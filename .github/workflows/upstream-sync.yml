@@ -1,0 +1,146 @@
+name: Sync from upstream
+
+on:
+  schedule:
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream release tag to merge (blank = latest release)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: JeffSteinbok/obsidian-onedrive
+  UPSTREAM_URL: https://github.com/JeffSteinbok/obsidian-onedrive.git
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read the upstream release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            tag=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name || true)
+          fi
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "No upstream release to sync yet."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Upstream release tag: ${tag}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the upstream tag
+        id: upstream
+        if: steps.release.outputs.found == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref="upstream-${TAG}"
+          git fetch --no-tags "${UPSTREAM_URL}" "refs/tags/${TAG}:refs/tags/${ref}"
+          sha=$(git rev-parse --verify "refs/tags/${ref}^{commit}")
+          echo "Tag ${TAG} is commit ${sha}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the tag is already merged
+        id: state
+        if: steps.release.outputs.found == 'true'
+        env:
+          SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "Already merged into main. Nothing to do."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Not merged yet."
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge the upstream release
+        id: merge
+        if: steps.state.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ steps.upstream.outputs.ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge --no-edit "refs/tags/${REF}"; then
+            git push origin HEAD:main
+            gh workflow run release.yml --ref main
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            { git diff --name-only --diff-filter=U | sort > "$RUNNER_TEMP/conflicts.txt"; } || true
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report the conflict
+        id: report
+        if: >-
+          steps.state.outputs.needed == 'true' &&
+          steps.merge.outcome == 'success' &&
+          steps.merge.outputs.merged != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          title="Upstream sync conflict: ${TAG}"
+          paths=$(cat "$RUNNER_TEMP/conflicts.txt")
+          [ -n "$paths" ] || paths="(git reported no unmerged paths)"
+          existing=$(gh issue list --state open --limit 100 --json number,title \
+            --jq ".[] | select(.title == \"${title}\") | .number" | head -n 1 || true)
+          write_body() {
+            cat <<EOF
+          The upstream release \`${TAG}\` (${SHA}) does not merge into \`main\` cleanly.
+
+          Conflicting paths:
+          \`\`\`
+          ${paths}
+          \`\`\`
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          To resolve locally:
+          \`\`\`
+          git fetch upstream --tags
+          git merge ${TAG}
+          git push origin main
+          \`\`\`
+          EOF
+          }
+          if [ -n "$existing" ]; then
+            write_body | gh issue comment "$existing" --body-file -
+            echo "Commented on issue #${existing}"
+          else
+            write_body | gh issue create --title "$title" --body-file -
+          fi
+          exit 1
