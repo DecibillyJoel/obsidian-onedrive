@@ -156,6 +156,17 @@ export interface SyncOperation {
 	 * corrupts every id-keyed inference we make (issues #177, #178).
 	 */
 	isConflictCopy?: boolean;
+	/**
+	 * OneDrive ID of the remote item whose deletion drives this DOWNLOAD. The
+	 * local delete only proceeds while this id still owns `path`, so a tombstone
+	 * cannot remove an unrelated file that has since taken the path over.
+	 */
+	deleteRemoteId?: string;
+	/**
+	 * False when this DOWNLOAD must NOT claim the remote item's OneDrive ID as
+	 * the local path's identity — used for copies written to a new dated path.
+	 */
+	trackRemoteId?: boolean;
 }
 
 export interface LargeDeleteWarningInfo {
@@ -238,6 +249,11 @@ export interface SyncEngineOptions {
 	useAtomicMoves?: () => boolean;
 	/** Returns true if pull-only mode is enabled */
 	isPullOnlyMode?: () => boolean;
+	/**
+	 * Returns true when every hidden path should sync, including
+	 * .workspaces and the whole config dir (power-user mode).
+	 */
+	isSyncAllHiddenFiles?: () => boolean;
 	/**
 	 * True when running in app-folder mode. Used to detect and retire a legacy,
 	 * unscoped app-folder delta cursor that could return sibling vaults' files
@@ -342,6 +358,7 @@ export interface PluginSettings {
 	syncPluginData: boolean; // Opt-in sync for plugin data.json files (except this plugin's own data)
 	syncCssSnippets: boolean; // Opt-in sync for CSS snippets in .obsidian/snippets/
 	syncBookmarks: boolean; // Opt-in sync for Obsidian bookmarks (.obsidian/bookmarks.json)
+	syncAllHiddenFiles: boolean; // Sync every hidden path, including .workspaces and all of the config dir
 	syncState?: {
 		lastSyncTime: number;
 		fileStates: Array<[string, FileState]>;
@@ -390,6 +407,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
 	syncPluginData: false,
 	syncCssSnippets: false,
 	syncBookmarks: false,
+	syncAllHiddenFiles: false,
 	syncState: undefined,
 	conflictQueue: undefined,
 

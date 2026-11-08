@@ -316,6 +316,10 @@ export const en = {
 				name: 'Sync bookmarks',
 				desc: 'Sync {{configDir}}/bookmarks.json to keep bookmarks consistent across devices.',
 			},
+			allHiddenFiles: {
+				name: 'Sync all hidden files and folders (power user)',
+				desc: "Sync every hidden path, including .workspaces and all of {{configDir}}. This overrides the selective settings above. The OneDrive Sync plugin's own folder and local debug logs remain excluded to protect credentials and sync state.",
+			},
 			status: {
 				name: 'Sync status',
 				desc: 'Status: {{status}} · Last sync: {{lastSync}} · Progress: {{progress}} · Conflicts: {{conflicts}}',

@@ -9,7 +9,7 @@
 ## Setup
 
 ```bash
-git clone https://github.com/JeffSteinbok/obsidian-onedrive.git
+git clone https://github.com/DecibillyJoel/obsidian-onedrive.git
 cd obsidian-onedrive
 npm install
 ```

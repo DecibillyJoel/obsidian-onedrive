@@ -26,7 +26,15 @@ export class EventManager {
 	// sync gets scheduled once the current one finishes (instead of the change
 	// sitting in the dirty queue until the next unrelated trigger).
 	private syncRequestedDuringSync = false;
-	private dirtyFiles: Map<string, LocalChange> = new Map();
+	// Dirty entries are keyed by queue slot (e.g. `path:notes/a.md`,
+	// `rename:notes/a.md`) so a rename owns its own slot instead of
+	// colliding with the new path. Each entry carries the revision at which
+	// it was queued.
+	private dirtyFiles: Map<string, { change: LocalChange; revision: number }> = new Map();
+	// Monotonic queue revision. A sync acknowledges only entries at or below
+	// the revision it snapshotted, so an event arriving while I/O is in flight
+	// can never be erased by end-of-sync cleanup.
+	private dirtyRevision = 0;
 	// Paths we wrote during sync — events for these are our own writes, not user edits
 	private ownWritePaths: Set<string> = new Set();
 	// Suppress raw config events until after the first sync completes,
@@ -146,7 +154,26 @@ export class EventManager {
 	 * Call clearDirtyFiles() after successful sync.
 	 */
 	getDirtyFiles(): LocalChange[] {
-		return Array.from(this.dirtyFiles.values());
+		return Array.from(this.dirtyFiles.values(), (entry) => entry.change);
+	}
+
+	/** Capture a stable acknowledgement boundary for one sync attempt. */
+	getDirtySnapshot(): { changes: LocalChange[]; revision: number } {
+		return { changes: this.getDirtyFiles(), revision: this.dirtyRevision };
+	}
+
+	/**
+	 * Acknowledge work from a previously captured snapshot. Entries replaced
+	 * or added after the snapshot have a newer revision and remain queued.
+	 * When paths are supplied, only completed paths are acknowledged.
+	 */
+	acknowledgeDirtySnapshot(revision: number, paths?: string[]): void {
+		const completedPaths = paths ? new Set(paths) : undefined;
+		for (const [key, entry] of this.dirtyFiles) {
+			if (entry.revision > revision) continue;
+			if (completedPaths && !completedPaths.has(entry.change.path)) continue;
+			this.dirtyFiles.delete(key);
+		}
 	}
 
 	/**
@@ -160,8 +187,11 @@ export class EventManager {
 	 * Remove specific paths from the dirty set (e.g., files we just downloaded)
 	 */
 	removeDirtyPaths(paths: string[]): void {
-		for (const path of paths) {
-			this.dirtyFiles.delete(path);
+		const removedPaths = new Set(paths);
+		for (const [key, entry] of this.dirtyFiles) {
+			if (removedPaths.has(entry.change.path)) {
+				this.dirtyFiles.delete(key);
+			}
 		}
 	}
 
@@ -170,7 +200,20 @@ export class EventManager {
 	 */
 	addDirtyFile(path: string, type: 'modify' | 'create'): void {
 		const changeType = type === 'create' ? LocalChangeType.CREATE : LocalChangeType.MODIFY;
-		this.dirtyFiles.set(path, { path, type: changeType });
+		this.queueChange({ path, type: changeType });
+	}
+
+	/** Queue a change under its queue slot, stamping the current revision. */
+	queueChange(change: LocalChange, key: string = `path:${change.path}`): void {
+		this.dirtyFiles.set(key, { change, revision: ++this.dirtyRevision });
+	}
+
+	deleteQueuedPath(path: string): void {
+		this.dirtyFiles.delete(`path:${path}`);
+	}
+
+	getQueuedPath(path: string): LocalChange | undefined {
+		return this.dirtyFiles.get(`path:${path}`)?.change;
 	}
 
 	/**
@@ -180,8 +223,8 @@ export class EventManager {
 	 */
 	requeueChanges(changes: LocalChange[]): void {
 		for (const change of changes) {
-			if (!this.dirtyFiles.has(change.path)) {
-				this.dirtyFiles.set(change.path, change);
+			if (!this.getQueuedPath(change.path)) {
+				this.queueChange(change);
 			}
 		}
 	}
@@ -195,7 +238,7 @@ export class EventManager {
 		this.eventRefs.push(
 			this.app.vault.on('modify', (file) => {
 				if (file instanceof TFile && !this.shouldIgnoreEvent(file.path)) {
-					this.dirtyFiles.set(file.path, { path: file.path, type: LocalChangeType.MODIFY });
+					this.queueChange({ path: file.path, type: LocalChangeType.MODIFY });
 					this.scheduleSync();
 				}
 			})
@@ -204,6 +247,19 @@ export class EventManager {
 		this.eventRefs.push(
 			this.app.vault.on('create', (file) => {
 				if (file instanceof TFile && !this.shouldIgnoreEvent(file.path)) {
+					// A file deleted and recreated before the sync drained its DELETE
+					// is an edit, not a new file — queue the type the vault now holds.
+					const previous = this.getQueuedPath(file.path);
+					if (previous?.type === LocalChangeType.DELETE) {
+						this.queueChange({
+							path: file.path,
+							type: this.stateManager.getFileState(file.path)
+								? LocalChangeType.MODIFY
+								: LocalChangeType.CREATE,
+						});
+						this.scheduleSync();
+						return;
+					}
 					// If file is already tracked in sync state, this is Obsidian
 					// re-indexing on startup — not a real new file.
 					//
@@ -217,14 +273,14 @@ export class EventManager {
 					if (this.stateManager.getFileState(file.path)) {
 						return;
 					}
-					this.dirtyFiles.set(file.path, { path: file.path, type: LocalChangeType.CREATE });
+					this.queueChange({ path: file.path, type: LocalChangeType.CREATE });
 					this.scheduleSync();
 				} else if (file instanceof TFolder && !this.shouldIgnoreEvent(file.path)) {
 					// Suppress folder creates until initial sync completes —
 					// Obsidian fires create events for all existing folders on startup
 					if (!this.initialSyncDone) return;
 					if (this.stateManager.getFolderIdByPath(file.path)) return;
-					this.dirtyFiles.set(file.path, { path: file.path, type: LocalChangeType.FOLDER_CREATE });
+					this.queueChange({ path: file.path, type: LocalChangeType.FOLDER_CREATE });
 					this.scheduleSync();
 				}
 			})
@@ -233,10 +289,10 @@ export class EventManager {
 		this.eventRefs.push(
 			this.app.vault.on('delete', (file) => {
 				if (file instanceof TFile && !this.shouldIgnoreEvent(file.path)) {
-					this.dirtyFiles.set(file.path, { path: file.path, type: LocalChangeType.DELETE });
+					this.queueChange({ path: file.path, type: LocalChangeType.DELETE });
 					this.scheduleSync();
 				} else if (file instanceof TFolder && !this.shouldIgnoreEvent(file.path)) {
-					this.dirtyFiles.set(file.path, { path: file.path, type: LocalChangeType.FOLDER_DELETE });
+					this.queueChange({ path: file.path, type: LocalChangeType.FOLDER_DELETE });
 					this.scheduleSync();
 				}
 			})
@@ -246,30 +302,40 @@ export class EventManager {
 			this.app.vault.on('rename', (file, oldPath) => {
 				if (file instanceof TFile && !this.shouldIgnoreEvent(file.path)) {
 					logger.debug(`Vault rename event: ${oldPath} → ${file.path}`);
-					this.dirtyFiles.delete(oldPath);
-					this.dirtyFiles.set(file.path, {
-						path: file.path,
-						type: LocalChangeType.RENAME,
-						oldPath,
-					});
+					// A rename of a file we still believe is new is just the user
+					// naming it — queue a CREATE at the new path (the OneDrive item
+					// does not exist yet, so a RENAME would look up a missing id).
+					const sourceChange = this.getQueuedPath(oldPath);
+					this.deleteQueuedPath(oldPath);
+					if (sourceChange?.type === LocalChangeType.CREATE) {
+						this.queueChange({ path: file.path, type: LocalChangeType.CREATE });
+					} else {
+						this.queueChange(
+							{ path: file.path, type: LocalChangeType.RENAME, oldPath },
+							`rename:${oldPath}`
+						);
+					}
 					this.scheduleSync();
 				} else if (file instanceof TFolder && !this.shouldIgnoreEvent(file.path)) {
 					logger.debug(`Vault folder rename event: ${oldPath} → ${file.path}`);
-					if (this.dirtyFiles.has(oldPath)) {
-						this.dirtyFiles.delete(oldPath);
+					if (this.getQueuedPath(oldPath)) {
+						this.deleteQueuedPath(oldPath);
 					}
 					// Check if this is a rename of an existing tracked folder vs a new folder
 					const folderId = this.stateManager.getFolderIdByPath(oldPath);
 					if (folderId) {
 						// This is a rename of an existing synced folder — use FOLDER_RENAME
-						this.dirtyFiles.set(file.path, {
-							path: file.path,
-							type: LocalChangeType.FOLDER_RENAME,
-							oldPath,
-						});
+						this.queueChange(
+							{
+								path: file.path,
+								type: LocalChangeType.FOLDER_RENAME,
+								oldPath,
+							},
+							`rename:${oldPath}`
+						);
 					} else {
 						// New folder being renamed (e.g., "Untitled" → real name) — treat as create
-						this.dirtyFiles.set(file.path, { path: file.path, type: LocalChangeType.FOLDER_CREATE });
+						this.queueChange({ path: file.path, type: LocalChangeType.FOLDER_CREATE });
 					}
 					this.scheduleSync();
 				}
@@ -293,18 +359,18 @@ export class EventManager {
 				// rewrites config files on startup with new mtimes.
 				if (!this.initialSyncDone) return;
 				// Already queued by a typed event — skip
-				if (this.dirtyFiles.has(path)) return;
+				if (this.getQueuedPath(path)) return;
 
 				// Compare mtime/size against tracked state to avoid false
 				// positives from Obsidian touching config files on startup.
 				const tracked = this.stateManager.getFileState(path);
 				void this.app.vault.adapter.stat(path).then((stat) => {
-					if (this.dirtyFiles.has(path)) return; // raced with another event
+					if (this.getQueuedPath(path)) return; // raced with another event
 
 					if (!stat || stat.type !== 'file') {
 						// File no longer exists — if we were tracking it, it's a delete
 						if (tracked) {
-							this.dirtyFiles.set(path, { path, type: LocalChangeType.DELETE });
+							this.queueChange({ path, type: LocalChangeType.DELETE });
 							logger.debug(`Raw event: config file deleted: ${path}`);
 							this.scheduleSync();
 						}
@@ -315,7 +381,7 @@ export class EventManager {
 						return; // unchanged — ignore
 					}
 					const type = tracked ? LocalChangeType.MODIFY : LocalChangeType.CREATE;
-					this.dirtyFiles.set(path, { path, type });
+					this.queueChange({ path, type });
 					logger.debug(`Raw event: config file changed: ${path}`);
 					this.scheduleSync();
 				});

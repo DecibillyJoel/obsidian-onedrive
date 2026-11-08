@@ -86,6 +86,7 @@ import {
 	stripGraphPrefix,
 	shouldSyncVaultPath,
 	getAllSyncableConfigPaths,
+	listAdapterTree,
 } from '../utils/pathUtils';
 import { ProgressNotice } from '../ui/progressNotice';
 import { t } from '../i18n';
@@ -211,6 +212,7 @@ export class SyncEngine {
 	private readonly getNotificationLevel: () => NotificationLevel;
 	private readonly pluginVersion: string;
 	private readonly isPullOnlyMode: () => boolean;
+	private readonly isSyncAllHiddenFiles: () => boolean;
 	private readonly isAppFolder: boolean;
 
 	constructor(
@@ -235,6 +237,7 @@ export class SyncEngine {
 		this.maxConcurrentOperations = options.maxConcurrentOperations ?? 4;
 		this.useAtomicMoves = options.useAtomicMoves ?? (() => true);
 		this.isPullOnlyMode = options.isPullOnlyMode ?? (() => false);
+		this.isSyncAllHiddenFiles = options.isSyncAllHiddenFiles ?? (() => false);
 		this.isAppFolder = options.isAppFolder ?? false;
 
 		this.isSharedDrive = oneDriveClient.isSharedDrive();
@@ -245,6 +248,12 @@ export class SyncEngine {
 
 	private isObsidianPath(path: string): boolean {
 		return normalizePath(path).startsWith(`${normalizePath(this.configDir).replace(/\/+$/g, '')}/`);
+	}
+
+	private shouldSyncObsidianScope(): boolean {
+		return ['community-plugins.json', 'app.json', 'bookmarks.json', 'snippets'].some((path) =>
+			this.shouldSyncPath(`${this.configDir}/${path}`)
+		);
 	}
 
 	/**
@@ -284,6 +293,14 @@ export class SyncEngine {
 			}
 		};
 
+		// Capture the queue revision before anything is acknowledged. A
+		// snapshot pins the exact set of local changes this run drains, so
+		// events that arrive mid-sync are neither lost nor acknowledged.
+		const dirtySnapshot = this.eventManager.getDirtySnapshot?.() ?? {
+			changes: this.eventManager.getDirtyFiles(),
+			revision: undefined,
+		};
+
 		try {
 			progress(t('progress.starting'));
 
@@ -293,12 +310,31 @@ export class SyncEngine {
 			// Phase 1: Collect local dirty files, filtering out .syncIgnore matches
 			const ignoreMatchers = await this.loadIgnoreMatchers();
 			const isFirstSync = this.stateManager.isFirstSync();
-			const { localChanges, folderChanges } = await this.gatherLocalChanges(ignoreMatchers);
+			const { localChanges, folderChanges } = await this.gatherLocalChanges(
+				ignoreMatchers,
+				dirtySnapshot.changes
+			);
+
+			// Recover local files whose create event was lost or whose tracked
+			// state was sanitized. Remote matches go through the planner so
+			// conflict policy still applies (issues #177, #178).
+			const recoveredRemoteItems: OneDriveItem[] = [];
+			if (!isFirstSync && !this.isPullOnlyMode()) {
+				const recovered = await this.discoverUntrackedLocalFiles(ignoreMatchers, localChanges);
+				localChanges.push(...recovered.localChanges);
+				recoveredRemoteItems.push(...recovered.remoteItems);
+			}
 
 			// Phase 2: Fetch remote delta changes from OneDrive, expand folder
 			// deletes into per-file deletes, and filter by sync scope
-			const { remoteChanges, deltaResponse, obsidianDeltaResponse, deletedFolderPaths, folderMoves } =
-				await this.fetchAndFilterRemoteChanges(ignoreMatchers, progress);
+			const {
+				remoteChanges,
+				deltaResponse,
+				obsidianDeltaResponse,
+				deletedFolderPaths,
+				folderMoves,
+			} = await this.fetchAndFilterRemoteChanges(ignoreMatchers, progress);
+			remoteChanges.push(...recoveredRemoteItems);
 
 			// Apply any folder moves/renames detected on the remote (e.g. a
 			// folder reorganized on another device) before planning, so
@@ -410,7 +446,7 @@ export class SyncEngine {
 
 			// Phase 5: Finalize — store delta cursors so next sync starts where
 			// this one left off, clear the dirty queue, re-mark conflicts
-			if (downloadedPaths.length > 0) {
+			if (downloadedPaths.length > 0 && dirtySnapshot.revision === undefined) {
 				this.eventManager.removeDirtyPaths(downloadedPaths);
 			}
 
@@ -420,7 +456,15 @@ export class SyncEngine {
 			}
 			this.stateManager.setLastSyncTime(Date.now());
 
-			if (failedPaths.length === 0 && conflictedPaths.length === 0) {
+			if (dirtySnapshot.revision !== undefined && this.eventManager.acknowledgeDirtySnapshot) {
+				// Only acknowledge the changes this run actually drained. Anything
+				// queued after the snapshot keeps its dirty state for the next run.
+				const failedPathSet = new Set([...failedPaths, ...conflictedPaths]);
+				const acknowledgedPaths = dirtySnapshot.changes
+					.filter((change) => !failedPathSet.has(change.path))
+					.map((change) => change.path);
+				this.eventManager.acknowledgeDirtySnapshot(dirtySnapshot.revision, acknowledgedPaths);
+			} else if (failedPaths.length === 0 && conflictedPaths.length === 0) {
 				this.eventManager.clearDirtyFiles();
 			} else {
 				const failedPathSet = new Set(failedPaths);
@@ -536,7 +580,10 @@ export class SyncEngine {
 	 *
 	 * In pull-only mode, returns empty changes (local edits are not uploaded).
 	 */
-	private async gatherLocalChanges(ignoreMatchers: RegExp[]): Promise<LocalChangesResult> {
+	private async gatherLocalChanges(
+		ignoreMatchers: RegExp[],
+		dirtySnapshot?: LocalChange[]
+	): Promise<LocalChangesResult> {
 		// In pull-only mode, skip all local change detection — we only download
 		if (this.isPullOnlyMode()) {
 			logger.info('Pull-only mode: skipping local change detection');
@@ -549,7 +596,7 @@ export class SyncEngine {
 			};
 		}
 
-		const allLocalChanges = this.eventManager.getDirtyFiles();
+		const allLocalChanges = dirtySnapshot ?? this.eventManager.getDirtyFiles();
 		const ignoredLocalPaths: string[] = [];
 		const folderChanges: LocalChange[] = [];
 		const localChanges = allLocalChanges.filter((change) => {
@@ -623,7 +670,10 @@ export class SyncEngine {
 			logger.debug(`  Local folder: ${change.type} ${change.path}`);
 		}
 
-		const discoveredFolderCreates = this.discoverUntrackedLocalFolders(ignoreMatchers, folderChanges);
+		const discoveredFolderCreates = await this.discoverUntrackedLocalFolders(
+			ignoreMatchers,
+			folderChanges
+		);
 		if (discoveredFolderCreates.length > 0) {
 			folderChanges.push(...discoveredFolderCreates);
 			logger.info(
@@ -767,10 +817,10 @@ export class SyncEngine {
 		return changes;
 	}
 
-	private discoverUntrackedLocalFolders(
+	private async discoverUntrackedLocalFolders(
 		ignoreMatchers: RegExp[],
 		existingFolderChanges: LocalChange[]
-	): LocalChange[] {
+	): Promise<LocalChange[]> {
 		const pendingFolderPaths = new Set(existingFolderChanges.map((change) => change.path));
 		const configDir = normalizePath(this.configDir).replace(/\/+$/, '');
 		const discovered: LocalChange[] = [];
@@ -802,6 +852,21 @@ export class SyncEngine {
 
 		traverseFolderTree(root);
 
+		if (this.isSyncAllHiddenFiles()) {
+			const tree = await listAdapterTree(this.app.vault.adapter);
+			for (const path of tree.folders) {
+				if (
+					!pendingFolderPaths.has(path) &&
+					!this.stateManager.getFolderIdByPath(path) &&
+					this.shouldSyncPath(path) &&
+					!this.shouldIgnorePath(path, ignoreMatchers)
+				) {
+					discovered.push({ path, type: LocalChangeType.FOLDER_CREATE });
+					pendingFolderPaths.add(path);
+				}
+			}
+		}
+
 		return discovered;
 	}
 
@@ -821,11 +886,16 @@ export class SyncEngine {
 		const changes: LocalChange[] = [];
 
 		// Gather all syncable config paths (fixed + installed plugins)
-		const allConfigPaths = await getAllSyncableConfigPaths(
-			this.configDir,
-			adapter,
-			(path) => this.shouldSyncPath(path)
-		);
+		const configPrefix = `${normalizePath(this.configDir).replace(/\/+$/, '')}/`;
+		const allConfigPaths = this.isSyncAllHiddenFiles()
+			? (await listAdapterTree(adapter)).files.filter(
+					(path) =>
+						path.startsWith(configPrefix) ||
+						!(this.app.vault.getAbstractFileByPath(path) instanceof TFile)
+				)
+			: await getAllSyncableConfigPaths(this.configDir, adapter, (path) =>
+					this.shouldSyncPath(path)
+				);
 
 		const checkedPaths = new Set<string>();
 
@@ -895,7 +965,7 @@ export class SyncEngine {
 		// only lists currently-existing folders.
 		const pluginPrefix = `${this.configDir}/plugins/`;
 		for (const path of this.stateManager.getTrackedPaths()) {
-			if (!path.startsWith(pluginPrefix)) continue;
+			if (!this.isSyncAllHiddenFiles() && !path.startsWith(pluginPrefix)) continue;
 			if (checkedPaths.has(path)) continue;
 			if (!this.shouldSyncPath(path)) continue;
 			if (this.shouldIgnorePath(path, ignoreMatchers)) continue;
@@ -954,9 +1024,7 @@ export class SyncEngine {
 		progress(t('progress.fetchingRemoteChanges'));
 		this.retireLegacyUnscopedDeltaLink();
 		const deltaLink = this.stateManager.getDeltaLink();
-		const shouldSyncObsidianScope =
-			this.shouldSyncPath(`${this.configDir}/community-plugins.json`) ||
-			this.shouldSyncPath(`${this.configDir}/app.json`);
+		const shouldSyncObsidianScope = this.shouldSyncObsidianScope();
 		const isFirstSync = this.stateManager.isFirstSync();
 		logger.info(`Delta query: isFirstSync=${isFirstSync}, hasDeltaLink=${!!deltaLink}`);
 		const obsidianDeltaLink = this.stateManager.getObsidianDeltaLink();
@@ -977,13 +1045,15 @@ export class SyncEngine {
 			);
 		}
 
+		const mainItems = this.normalizeDeltaItems(deltaResponse.items);
+		const obsidianItems = this.normalizeDeltaItems(obsidianDeltaResponse?.items || []);
 		const { synthesizedDeletes, deletedFolderPaths, folderMoves } = this.expandFolderDeletes([
-			...deltaResponse.items,
-			...(obsidianDeltaResponse?.items || []),
+			...mainItems,
+			...obsidianItems,
 		]);
 		const remoteChanges = this.filterDeltaItems(
-			deltaResponse.items,
-			obsidianDeltaResponse?.items || [],
+			mainItems,
+			obsidianItems,
 			synthesizedDeletes,
 			ignoreMatchers
 		);
@@ -1012,6 +1082,31 @@ export class SyncEngine {
 			deletedFolderPaths,
 			folderMoves,
 		};
+	}
+
+	/**
+	 * Graph may repeat an item several times across delta pages. Identity, not
+	 * pathname, defines the stream: retain the final occurrence of each id.
+	 * Tombstones resolve through the recorded id even when Graph also supplies
+	 * a stale name/parent path (moves and replacements make that path unsafe).
+	 */
+	private normalizeDeltaItems(items: OneDriveItem[]): OneDriveItem[] {
+		const lastIndexById = new Map<string, number>();
+		items.forEach((item, index) => {
+			if (item.id) lastIndexById.set(item.id, index);
+		});
+		const normalized: OneDriveItem[] = [];
+		items.forEach((item, index) => {
+			if (item.id && lastIndexById.get(item.id) !== index) return;
+			if (item.deleted && item.id) {
+				const trackedPath = this.stateManager.getPathByOneDriveId(item.id);
+				if (trackedPath) normalized.push({ ...item, __resolvedVaultPath: trackedPath });
+				else normalized.push(item);
+			} else {
+				normalized.push(item);
+			}
+		});
+		return normalized;
 	}
 
 	/**
@@ -1063,8 +1158,9 @@ export class SyncEngine {
 					if (previousPath && previousPath !== folderPath) {
 						logger.info(`Folder move detected: ${previousPath} → ${folderPath} (id=${item.id})`);
 						folderMoves.push({ oldPath: previousPath, newPath: folderPath });
+					} else {
+						this.stateManager.setFolderState(item.id, folderPath);
 					}
-					this.stateManager.setFolderState(item.id, folderPath);
 				}
 			}
 		}
@@ -1113,6 +1209,76 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Recover syncable local files whose create event was lost or whose state
+	 * was sanitized. Existing remote paths are returned to the normal planner
+	 * so conflict policy applies; only a confirmed 404 is treated as local-only.
+	 */
+	private async discoverUntrackedLocalFiles(
+		ignoreMatchers: RegExp[],
+		existingChanges: LocalChange[]
+	): Promise<{ localChanges: LocalChange[]; remoteItems: OneDriveItem[] }> {
+		const covered = new Set(existingChanges.map((change) => change.path));
+		for (const path of this.stateManager.getTrackedPaths()) covered.add(path);
+		const candidates = new Set(this.app.vault.getFiles().map((file) => normalizePath(file.path)));
+		if (this.isSyncAllHiddenFiles()) {
+			const tree = await listAdapterTree(this.app.vault.adapter);
+			for (const path of tree.files) candidates.add(normalizePath(path));
+		}
+		const localChanges: LocalChange[] = [];
+		const remoteItems: OneDriveItem[] = [];
+		for (const path of candidates) {
+			if (covered.has(path) || !this.shouldSyncPath(path)) continue;
+			if (this.shouldIgnorePath(path, ignoreMatchers)) continue;
+			if (this.conflictQueue?.hasConflict(path)) continue;
+			try {
+				const remotePath = this.vaultPathToRemotePath(path);
+				const item = await this.oneDriveClient.getItemByPath(remotePath);
+				if (item.file) {
+					item.__resolvedVaultPath = path;
+					remoteItems.push(item);
+				}
+			} catch (error) {
+				if (!this.isRemoteItemNotFound(error)) {
+					logger.warn(`Could not verify untracked local path ${path}; deferring recovery`, error);
+					continue;
+				}
+			}
+			localChanges.push({ path, type: LocalChangeType.CREATE });
+			covered.add(path);
+		}
+		if (localChanges.length > 0) {
+			logger.info(
+				`Incremental inventory recovery: queued ${localChanges.length} untracked local files`
+			);
+		}
+		return { localChanges, remoteItems };
+	}
+
+	/**
+	 * True when a Graph lookup failed because the remote item genuinely does
+	 * not exist (HTTP 404), as opposed to a transient network or auth error.
+	 */
+	private isRemoteItemNotFound(error: unknown): boolean {
+		const client = this.oneDriveClient as unknown as {
+			isItemNotFoundError?: (error: unknown) => boolean;
+		};
+		if (client.isItemNotFoundError?.(error)) return true;
+		if (!error || typeof error !== 'object') return false;
+		const value = error as {
+			statusCode?: unknown;
+			status?: unknown;
+			code?: unknown;
+			message?: unknown;
+		};
+		return (
+			value.statusCode === 404 ||
+			value.status === 404 ||
+			value.code === 'itemNotFound' ||
+			(typeof value.message === 'string' && value.message.toLowerCase().includes('not found'))
+		);
+	}
+
+	/**
 	 * On first sync (or post-reset), the dirty-file queue is empty so the
 	 * planner only sees files via the remote delta. Local files that don't
 	 * exist remotely would silently be skipped. Walk the vault and add
@@ -1142,11 +1308,11 @@ export class SyncEngine {
 
 		// Also enumerate config files that vault.getFiles() misses
 		const adapter = this.app.vault.adapter;
-		const configPaths = await getAllSyncableConfigPaths(
-			this.configDir,
-			adapter,
-			(path) => this.shouldSyncPath(path)
-		);
+		const configPaths = this.isSyncAllHiddenFiles()
+			? (await listAdapterTree(adapter)).files
+			: await getAllSyncableConfigPaths(this.configDir, adapter, (path) =>
+					this.shouldSyncPath(path)
+				);
 		for (const path of configPaths) {
 			if (remoteCoveredPaths.has(path)) continue;
 			if (!this.shouldSyncPath(path)) continue;
@@ -1326,14 +1492,20 @@ export class SyncEngine {
 			if (change.type === LocalChangeType.DELETE) {
 				// Local delete — delete from remote if it exists there
 				const knownState = this.stateManager.getFileState(change.path);
-				if (knownState?.oneDriveId) {
+				const liveRemoteState =
+					remoteItem && !remoteItem.deleted && remoteItem.file
+						? this.itemToFileState(remoteItem)
+						: undefined;
+				const deleteState = liveRemoteState ?? knownState;
+				if (deleteState?.oneDriveId) {
 					operations.push({
 						path: change.path,
 						direction: SyncDirection.UPLOAD, // "upload" the deletion
 						localState: undefined,
-						remoteState: knownState,
+						remoteState: deleteState,
 					});
 				}
+				remoteByPath.delete(change.path);
 				continue;
 			}
 
@@ -1405,7 +1577,6 @@ export class SyncEngine {
 				// Upload the file at its new path
 				logger.debug(`Rename: scheduling upload to new path ${change.path}`);
 				operations.push({ path: change.path, direction: SyncDirection.UPLOAD });
-				this.stateManager.removeFileState(change.oldPath);
 				remoteByPath.delete(change.path);
 				continue;
 			}
@@ -1462,6 +1633,7 @@ export class SyncEngine {
 								path: resolution.duplicatePath,
 								direction: SyncDirection.DOWNLOAD,
 								remoteState,
+								trackRemoteId: false,
 								// The copy is a brand-new file with no remote
 								// counterpart; it must not be tracked under the
 								// base item's id (#177, #178).
@@ -1523,10 +1695,9 @@ export class SyncEngine {
 						path: vaultPath,
 						direction: SyncDirection.DOWNLOAD, // "download" the deletion
 						remoteState: undefined,
+						deleteRemoteId: item.id,
 					});
 				}
-				// Clean up tracked state regardless — the remote copy is gone
-				this.stateManager.removeFileState(vaultPath);
 				continue;
 			}
 
@@ -1637,7 +1808,7 @@ export class SyncEngine {
 			} else if (operation.direction === SyncDirection.DOWNLOAD) {
 				if (operation.remoteState === undefined) {
 					// This is a remote delete — delete locally
-					await this.deleteLocalFile(operation.path);
+					await this.deleteLocalFile(operation.path, operation.deleteRemoteId);
 				} else {
 					await this.downloadFile(operation);
 				}
@@ -1797,15 +1968,8 @@ export class SyncEngine {
 				logger.warn(`File vanished before upload: ${operation.path} — converting to remote delete`);
 				const knownState = this.stateManager.getFileState(operation.path);
 				if (knownState?.oneDriveId) {
-					try {
-						await this.fileOps.deleteFile(knownState.oneDriveId);
-						logger.debug(`Deleted remote ${operation.path} (vanished locally)`);
-					} catch (deleteError) {
-						logger.warn(
-							`Could not delete remote ${operation.path} after local vanish:`,
-							deleteError
-						);
-					}
+					await this.fileOps.deleteFile(knownState.oneDriveId);
+					logger.debug(`Deleted remote ${operation.path} (vanished locally)`);
 				}
 				this.stateManager.removeFileState(operation.path);
 				return;
@@ -1824,7 +1988,7 @@ export class SyncEngine {
 			remoteHash: item.file?.hashes?.quickXorHash || '',
 			size: content.byteLength,
 			remoteModifiedTime: new Date(item.lastModifiedDateTime).getTime(),
-			oneDriveId: item.id,
+			oneDriveId: operation.remoteState?.oneDriveId ?? item.id,
 			localContentHash: hashContent(new Uint8Array(content)),
 		});
 
@@ -1934,13 +2098,16 @@ export class SyncEngine {
 			return;
 		}
 
+		const existingOwner = this.stateManager.getPathByOneDriveId(operation.remoteState.oneDriveId);
+		const ownsRemoteItem =
+			operation.trackRemoteId !== false && (!existingOwner || existingOwner === operation.path);
 		this.stateManager.setFileState(operation.path, {
 			path: operation.path,
 			localMtime,
 			remoteHash: operation.remoteState.remoteHash,
 			size: content.byteLength,
 			remoteModifiedTime: operation.remoteState.remoteModifiedTime,
-			oneDriveId: operation.remoteState.oneDriveId,
+			oneDriveId: ownsRemoteItem ? operation.remoteState.oneDriveId : undefined,
 			localContentHash: hashContent(new Uint8Array(content)),
 		});
 
@@ -1950,7 +2117,21 @@ export class SyncEngine {
 	/**
 	 * Delete a local file
 	 */
-	private async deleteLocalFile(filePath: string): Promise<void> {
+	private async deleteLocalFile(filePath: string, expectedRemoteId?: string): Promise<void> {
+		const tracked = this.stateManager.getFileState(filePath);
+		if (expectedRemoteId && tracked?.oneDriveId && tracked.oneDriveId !== expectedRemoteId) {
+			throw new Error(
+				`Refusing local delete for ${filePath}: tombstone id ${expectedRemoteId} does not match tracked id ${tracked.oneDriveId}`
+			);
+		}
+		if (expectedRemoteId) {
+			const trackedPath = this.stateManager.getPathByOneDriveId(expectedRemoteId);
+			if (trackedPath && trackedPath !== filePath) {
+				throw new Error(
+					`Refusing local delete for ${filePath}: item ${expectedRemoteId} is tracked at ${trackedPath}`
+				);
+			}
+		}
 		const file = this.app.vault.getAbstractFileByPath(filePath);
 		if (file) {
 			this.eventManager.markOwnWrites([filePath]);
@@ -1975,8 +2156,8 @@ export class SyncEngine {
 				logger.debug(`Deleted local config file ${filePath}`);
 			}
 		}
-			this.stateManager.removeFileState(filePath);
-		}
+		this.stateManager.removeFileState(filePath);
+	}
 
 		/**
 		 * Delete local folders that the cloud explicitly told us were deleted,
@@ -2213,6 +2394,8 @@ export class SyncEngine {
 				// old folder) — the descendant files will simply be
 				// downloaded to their new locations as normal remote changes.
 				logger.debug(`Remote folder move ${oldPath} → ${newPath}: no local folder to move`);
+				const folderId = this.stateManager.getFolderIdByPath(oldPath);
+				if (folderId) this.stateManager.setFolderState(folderId, newPath);
 				continue;
 			}
 
@@ -2233,6 +2416,8 @@ export class SyncEngine {
 			try {
 				await this.app.vault.rename(folder, newPath);
 				this.updateChildPathsAfterFolderRename(oldPath, newPath);
+				const folderId = this.stateManager.getFolderIdByPath(oldPath);
+				if (folderId) this.stateManager.setFolderState(folderId, newPath);
 				logger.info(`Applied remote folder move locally: ${oldPath} → ${newPath}`);
 			} catch (error) {
 				for (const path of ownWritePaths) {
@@ -2401,7 +2586,6 @@ export class SyncEngine {
 					logger.warn(
 						`Failed to remove stale local copy ${oldPath}: ${error instanceof Error ? error.message : error}`
 					);
-					this.stateManager.removeFileState(oldPath);
 				}
 				continue;
 			}
@@ -2653,6 +2837,68 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Snapshot every local file we'd sync, including config paths that
+	 * vault.getFiles() does not report. Used by both reconcile directions so
+	 * hidden paths are enumerated only when the user opted into them.
+	 */
+	private async snapshotLocalFiles(
+		ignoreMatchers: RegExp[]
+	): Promise<Map<string, { path: string; size: number }>> {
+		const result = new Map<string, { path: string; size: number }>();
+		for (const file of this.app.vault.getFiles()) {
+			if (!this.shouldSyncPath(file.path) || this.shouldIgnorePath(file.path, ignoreMatchers))
+				continue;
+			result.set(file.path, { path: file.path, size: file.stat.size });
+		}
+
+		const adapter = this.app.vault.adapter;
+		const adapterPaths = this.isSyncAllHiddenFiles()
+			? (await listAdapterTree(adapter)).files
+			: await getAllSyncableConfigPaths(this.configDir, adapter, (path) =>
+					this.shouldSyncPath(path)
+				);
+		for (const path of adapterPaths) {
+			if (result.has(path) || !this.shouldSyncPath(path)) continue;
+			if (this.shouldIgnorePath(path, ignoreMatchers)) continue;
+			try {
+				const stat = await adapter.stat(path);
+				if (stat?.type === 'file') {
+					result.set(path, { path, size: stat.size });
+				}
+			} catch {
+				// file doesn't exist, skip
+			}
+		}
+		return result;
+	}
+
+	/** Snapshot every local folder we'd sync, including hidden ones. */
+	private async snapshotLocalFolders(ignoreMatchers: RegExp[]): Promise<Set<string>> {
+		const tree = await listAdapterTree(this.app.vault.adapter);
+		return new Set(
+			tree.folders.filter(
+				(path) => this.shouldSyncPath(path) && !this.shouldIgnorePath(path, ignoreMatchers)
+			)
+		);
+	}
+
+	/** Create missing local folders, shallowest first, and flag our own writes. */
+	private async createMissingLocalFolders(paths: string[]): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		for (const path of [...new Set(paths)].sort(
+			(a, b) => a.split('/').length - b.split('/').length
+		)) {
+			if (await adapter.exists(path)) continue;
+			this.eventManager.markOwnWrites([path]);
+			await adapter.mkdir(path);
+			if (!(await adapter.exists(path))) {
+				this.eventManager.removeOwnWrite(path);
+				throw new Error(`Local folder creation did not create ${path}`);
+			}
+		}
+	}
+
+	/**
 	 * Reconcile the local vault from a full cloud listing. Treats cloud as
 	 * authoritative: any local file not present in cloud is deleted; any
 	 * cloud file not present locally is downloaded; size mismatches are
@@ -2665,6 +2911,7 @@ export class SyncEngine {
 	 */
 	async reconcileFromCloud(): Promise<void> {
 		logger.info('Starting reconcile-from-cloud operation');
+		const previousState = this.stateManager.prepareForSave();
 		const progress = (msg: string | undefined) => {
 			try {
 				this.onProgress?.(msg);
@@ -2686,49 +2933,38 @@ export class SyncEngine {
 
 			// 2. Build vaultPath -> OneDriveItem map for everything we'd sync.
 			const remoteFiles = new Map<string, OneDriveItem>();
+			const remoteFolders: string[] = [];
 			for (const item of allRemoteItems) {
 				const vaultPath = this.remotePathToVaultPath(item);
 				if (!vaultPath) continue;
-				if (item.folder) continue;
 				if (!this.shouldSyncPath(vaultPath)) continue;
 				if (this.shouldIgnorePath(vaultPath, ignoreMatchers)) continue;
+				if (item.folder) {
+					remoteFolders.push(vaultPath);
+					if (item.id) this.stateManager.setFolderState(item.id, vaultPath);
+					continue;
+				}
 				remoteFiles.set(vaultPath, item);
 			}
 
 			// 3. Snapshot local files we'd sync.
-			const localFiles = this.app.vault
-				.getFiles()
-				.filter((f) => this.shouldSyncPath(f.path))
-				.filter((f) => !this.shouldIgnorePath(f.path, ignoreMatchers));
-			const localByPath = new Map<string, { path: string; size: number }>(
-				localFiles.map((f) => [f.path, { path: f.path, size: f.stat.size }])
-			);
+			const localByPath = await this.snapshotLocalFiles(ignoreMatchers);
 
-			// Config files aren't in vault.getFiles() — add them via adapter
-			const adapter = this.app.vault.adapter;
-			const configPaths = await getAllSyncableConfigPaths(
-				this.configDir,
-				adapter,
-				(path) => this.shouldSyncPath(path)
-			);
-			for (const path of configPaths) {
-				if (localByPath.has(path)) continue;
-				if (!this.shouldSyncPath(path)) continue;
-				if (this.shouldIgnorePath(path, ignoreMatchers)) continue;
-				try {
-					const stat = await adapter.stat(path);
-					if (stat && stat.type === 'file') {
-						localByPath.set(path, { path, size: stat.size });
-					}
-				} catch {
-					// file doesn't exist, skip
+			// 4. Wipe tracked states so ghosts from previously-deleted files
+			//    don't survive the reconcile. Fresh state is rebuilt below from
+			//    the cloud listing + operation execution.
+			this.stateManager.clearFileStates();
+			this.stateManager.clearFolderStates();
+
+			// Remote folders must exist locally before we download into them.
+			await this.createMissingLocalFolders(remoteFolders);
+			for (const item of allRemoteItems) {
+				if (!item.folder || !item.id) continue;
+				const path = this.remotePathToVaultPath(item);
+				if (path && this.shouldSyncPath(path) && !this.shouldIgnorePath(path, ignoreMatchers)) {
+					this.stateManager.setFolderState(item.id, path);
 				}
 			}
-
-			// 4. Wipe tracked file states so ghosts from previously-deleted
-			//    files don't survive the reconcile. Fresh state is rebuilt
-			//    below from the cloud listing + operation execution.
-			this.stateManager.clearFileStates();
 
 			// 5. Plan operations.
 			const operations: SyncOperation[] = [];
@@ -2799,6 +3035,7 @@ export class SyncEngine {
 				});
 				if (decision !== 'proceed') {
 					logger.info(`Reconcile cancelled by user (${operations.length} ops aborted)`);
+					this.stateManager.loadState(previousState);
 					new Notice(t('notices.reconcile.cancelled'));
 					return;
 				}
@@ -2834,9 +3071,7 @@ export class SyncEngine {
 			// 8. Advance delta cursors so the next normal sync starts clean.
 			progress(t('progress.advancingDeltaCursor'));
 			try {
-				const shouldSyncObsidianScope =
-					this.shouldSyncPath(`${this.configDir}/community-plugins.json`) ||
-					this.shouldSyncPath(`${this.configDir}/app.json`);
+				const shouldSyncObsidianScope = this.shouldSyncObsidianScope();
 				// The two delta streams are independent — fetch them in parallel
 				const [newDelta, newObs] = await Promise.all([
 					this.oneDriveClient.getDelta(undefined, this.remoteRoot),
@@ -2865,6 +3100,7 @@ export class SyncEngine {
 				})
 			);
 		} catch (error) {
+			this.stateManager.loadState(previousState);
 			logger.error('Reconcile from cloud failed:', error);
 			new Notice(t('notices.reconcile.failed', { message: String(error) }));
 			throw error;
@@ -2885,6 +3121,7 @@ export class SyncEngine {
 	 */
 	async reconcileToCloud(): Promise<void> {
 		logger.info('Starting reconcile-to-cloud operation');
+		const previousState = this.stateManager.prepareForSave();
 		const progress = (msg: string | undefined) => {
 			try {
 				this.onProgress?.(msg);
@@ -2915,40 +3152,31 @@ export class SyncEngine {
 				remoteFiles.set(vaultPath, item);
 			}
 
-			// 3. Snapshot local files we'd sync.
-			const localFiles = this.app.vault
-				.getFiles()
-				.filter((f) => this.shouldSyncPath(f.path))
-				.filter((f) => !this.shouldIgnorePath(f.path, ignoreMatchers));
-			const localByPath = new Map<string, { path: string; size: number }>(
-				localFiles.map((f) => [f.path, { path: f.path, size: f.stat.size }])
-			);
+			// 3. Snapshot local files and folders we'd sync.
+			const localByPath = await this.snapshotLocalFiles(ignoreMatchers);
+			const localFolders = await this.snapshotLocalFolders(ignoreMatchers);
 
-			// Config files aren't in vault.getFiles() — add them via adapter
-			const adapter = this.app.vault.adapter;
-			const configPaths = await getAllSyncableConfigPaths(
-				this.configDir,
-				adapter,
-				(path) => this.shouldSyncPath(path)
-			);
-			for (const path of configPaths) {
-				if (localByPath.has(path)) continue;
-				if (!this.shouldSyncPath(path)) continue;
-				if (this.shouldIgnorePath(path, ignoreMatchers)) continue;
+			// 4. Wipe tracked states so ghosts from previously-deleted files
+			//    don't survive the reconcile. Fresh state is rebuilt below from
+			//    the local listing + operation execution.
+			this.stateManager.clearFileStates();
+			this.stateManager.clearFolderStates();
+
+			// Every local folder must exist in the cloud, shallowest first, with
+			// its OneDrive id recorded so later uploads can parent to it.
+			for (const folder of [...localFolders].sort(
+				(a, b) => a.split('/').length - b.split('/').length
+			)) {
+				const remotePath = this.vaultPathToRemotePath(folder);
 				try {
-					const stat = await adapter.stat(path);
-					if (stat && stat.type === 'file') {
-						localByPath.set(path, { path, size: stat.size });
-					}
-				} catch {
-					// file doesn't exist, skip
+					const item = await this.oneDriveClient.getItemByPath(remotePath);
+					if (item.folder) this.stateManager.setFolderState(item.id, folder);
+				} catch (error) {
+					if (!this.isRemoteItemNotFound(error)) throw error;
+					const created = await this.fileOps.createFolder(remotePath);
+					if (created?.id) this.stateManager.setFolderState(created.id, folder);
 				}
 			}
-
-			// 4. Wipe tracked file states so ghosts from previously-deleted
-			//    files don't survive the reconcile. Fresh state is rebuilt
-			//    below from the local listing + operation execution.
-			this.stateManager.clearFileStates();
 
 			// 5. Plan operations.
 			const operations: SyncOperation[] = [];
@@ -3018,6 +3246,7 @@ export class SyncEngine {
 				});
 				if (decision !== 'proceed') {
 					logger.info(`Reconcile-to-cloud cancelled by user (${operations.length} ops aborted)`);
+					this.stateManager.loadState(previousState);
 					new Notice(t('notices.reconcileToCloud.cancelled'));
 					return;
 				}
@@ -3053,9 +3282,7 @@ export class SyncEngine {
 			// 8. Advance delta cursors so the next normal sync starts clean.
 			progress(t('progress.advancingDeltaCursor'));
 			try {
-				const shouldSyncObsidianScope =
-					this.shouldSyncPath(`${this.configDir}/community-plugins.json`) ||
-					this.shouldSyncPath(`${this.configDir}/app.json`);
+				const shouldSyncObsidianScope = this.shouldSyncObsidianScope();
 				// The two delta streams are independent — fetch them in parallel
 				const [newDelta, newObs] = await Promise.all([
 					this.oneDriveClient.getDelta(undefined, this.remoteRoot),
@@ -3084,6 +3311,7 @@ export class SyncEngine {
 				})
 			);
 		} catch (error) {
+			this.stateManager.loadState(previousState);
 			logger.error('Reconcile to cloud failed:', error);
 			new Notice(t('notices.reconcileToCloud.failed', { message: String(error) }));
 			throw error;

@@ -281,6 +281,13 @@ export class OneDriveClient {
 			return await this.getGraph<OneDriveItem>(endpoint);
 		} catch (error) {
 			logger.error(`Failed to get item at path ${path}:`, error);
+			const graphError =
+				error && typeof error === 'object'
+					? (error as { statusCode?: unknown; code?: unknown })
+					: undefined;
+			const statusCode =
+				typeof graphError?.statusCode === 'number' ? graphError.statusCode : undefined;
+			const code = typeof graphError?.code === 'string' ? graphError.code : undefined;
 			throw new OneDriveError(
 				`Failed to get item: ${error instanceof Error ? error.message : 'Unknown error'}`
 			);
@@ -474,7 +481,7 @@ export class OneDriveClient {
 			logger.debug('Item deleted successfully');
 		} catch (error) {
 			// 404 means the item is already gone — that's the outcome we wanted
-			if (error && typeof error === 'object' && 'statusCode' in error && (error as { statusCode: number }).statusCode === 404) {
+			if (this.isItemNotFoundError(error)) {
 				logger.debug(`Item ${itemId} already deleted (404) — treating as success`);
 				return;
 			}

@@ -3,6 +3,14 @@
 	"version": "2.1.1",
 	"description": "Sync your Obsidian vault with OneDrive Personal/Consumer",
 	"main": "main.js",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/DecibillyJoel/obsidian-onedrive.git"
+	},
+	"homepage": "https://github.com/DecibillyJoel/obsidian-onedrive",
+	"bugs": {
+		"url": "https://github.com/DecibillyJoel/obsidian-onedrive/issues"
+	},
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",

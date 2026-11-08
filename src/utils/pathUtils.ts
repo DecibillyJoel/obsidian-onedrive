@@ -290,6 +290,45 @@ export async function getAllSyncableConfigPaths(
 	return [...fixedPaths, ...pluginPaths, ...snippetPaths];
 }
 
+/**
+ * Recursively list every file and folder below `root` through the vault
+ * adapter. Used when every hidden path is treated as syncable, where the
+ * known-path helpers cannot enumerate what exists.
+ */
+export async function listAdapterTree(
+	adapter: { list(path: string): Promise<{ files: string[]; folders: string[] }> },
+	root = ''
+): Promise<{ files: string[]; folders: string[] }> {
+	const files = new Set<string>();
+	const folders = new Set<string>();
+	const pending = [normalizePath(root).replace(/^\/+|\/+$/g, '')];
+	const visited = new Set<string>();
+	while (pending.length > 0) {
+		const current = pending.pop() ?? '';
+		if (visited.has(current)) {
+			continue;
+		}
+		visited.add(current);
+		try {
+			const listing = await adapter.list(current);
+			for (const file of listing.files) {
+				files.add(normalizePath(file).replace(/^\/+/, ''));
+			}
+			for (const folder of listing.folders) {
+				const normalized = normalizePath(folder).replace(/^\/+|\/+$/g, '');
+				if (!normalized || visited.has(normalized)) {
+					continue;
+				}
+				folders.add(normalized);
+				pending.push(normalized);
+			}
+		} catch {
+			// folder may not exist
+		}
+	}
+	return { files: Array.from(files), folders: Array.from(folders) };
+}
+
 function isInstalledPluginManifestPath(path: string, configDir: string): boolean {
 	const normalizedConfigDir = escapeRegExp(normalizeConfigDir(configDir));
 	return new RegExp(`^${normalizedConfigDir}/plugins/[^/]+/manifest\\.json$`).test(path);
@@ -326,7 +365,8 @@ export function shouldSyncVaultPath(
 	configDir: string,
 	syncCssSnippets = false,
 	syncBookmarks = false,
-	syncPluginData = false
+	syncPluginData = false,
+	syncAllHiddenFiles = false
 ): boolean {
 	const normalized = normalizePath(path);
 	const normalizedConfigDir = normalizeConfigDir(configDir);
@@ -355,6 +395,10 @@ export function shouldSyncVaultPath(
 	// Also exclude the old plugin folder (pre-rename) so upgrades don't sync stale data
 	if (normalized === oldPluginFolder || normalized.startsWith(`${oldPluginFolder}/`)) {
 		return false;
+	}
+
+	if (syncAllHiddenFiles) {
+		return true;
 	}
 
 	// Never sync Obsidian's per-device workspace state.

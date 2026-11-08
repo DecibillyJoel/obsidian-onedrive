@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: 📖 Troubleshooting guide
-    url: https://github.com/JeffSteinbok/obsidian-onedrive/blob/main/docs/TROUBLESHOOTING.md
+    url: https://github.com/DecibillyJoel/obsidian-onedrive/blob/main/docs/TROUBLESHOOTING.md
     about: Answers to common setup and sync questions. Still stuck? File a bug report or feature request.

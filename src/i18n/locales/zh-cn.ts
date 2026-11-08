@@ -309,6 +309,10 @@ export const zhCn = {
 				name: '同步书签',
 				desc: '同步 {{configDir}}/bookmarks.json，让书签在不同设备上保持一致。',
 			},
+			allHiddenFiles: {
+				name: '同步所有隐藏文件和文件夹（高级用户）',
+				desc: '同步包括整个 {{configDir}} 在内的所有隐藏路径。OneDrive Sync 自身的文件夹和本地调试日志仍会被排除。',
+			},
 			status: {
 				name: '同步状态',
 				desc: '状态：{{status}} · 上次同步：{{lastSync}} · 进度：{{progress}} · 冲突：{{conflicts}}',

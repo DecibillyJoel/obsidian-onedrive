@@ -386,7 +386,8 @@ export default class OneDriveSyncPlugin extends Plugin {
 						this.app.vault.configDir,
 						this.settings.syncCssSnippets,
 						this.settings.syncBookmarks,
-						this.settings.syncPluginData
+						this.settings.syncPluginData,
+						this.settings.syncAllHiddenFiles
 					),
 				this.settings.syncOnFileChange ?? true,
 				this.getFileChangeSyncDelayMs()
@@ -458,7 +459,8 @@ export default class OneDriveSyncPlugin extends Plugin {
 							this.app.vault.configDir,
 							this.settings.syncCssSnippets,
 							this.settings.syncBookmarks,
-							this.settings.syncPluginData
+							this.settings.syncPluginData,
+							this.settings.syncAllHiddenFiles
 						),
 					getLargeDeleteThreshold: () => this.settings.largeDeleteThreshold ?? 0,
 					getNotificationLevel: () => this.settings.notificationLevel ?? 'all',
@@ -468,6 +470,7 @@ export default class OneDriveSyncPlugin extends Plugin {
 					maxConcurrentOperations: this.getExperimentalSetting('maxConcurrentOperations'),
 					useAtomicMoves: () => this.getExperimentalSetting('useAtomicMoves'),
 					isPullOnlyMode: () => this.getExperimentalSetting('pullOnlyMode'),
+					isSyncAllHiddenFiles: () => this.settings.syncAllHiddenFiles,
 				}
 			);
 
@@ -1123,7 +1126,8 @@ export default class OneDriveSyncPlugin extends Plugin {
 							this.app.vault.configDir,
 							false,
 							false,
-							this.settings.syncPluginData
+							this.settings.syncPluginData,
+							this.settings.syncAllHiddenFiles
 						)
 				);
 				this.eventManager.setPullOnlyModeCheck(() => this.getExperimentalSetting('pullOnlyMode'));
@@ -1187,6 +1191,7 @@ export default class OneDriveSyncPlugin extends Plugin {
 		);
 
 		this.normalizeIdentitySettings();
+		this.settings.syncAllHiddenFiles = loaded.syncAllHiddenFiles === true;
 
 		// Migrate legacy enableDebugLogging boolean → logLevel string
 		const raw = this.settings as unknown as Record<string, unknown>;
@@ -1313,6 +1318,17 @@ export default class OneDriveSyncPlugin extends Plugin {
 		}
 
 		this.settings.syncBookmarks = enabled;
+		await this.saveSettings();
+	}
+
+	async onSyncAllHiddenFilesChanged(enabled: boolean): Promise<void> {
+		if (this.settings.syncAllHiddenFiles === enabled) {
+			return;
+		}
+
+		this.settings.syncAllHiddenFiles = enabled;
+		this.syncStateManager.resetDeltaLink();
+		this.syncStateManager.resetObsidianDeltaLink();
 		await this.saveSettings();
 	}
 

@@ -244,6 +244,10 @@ export class SyncStateManager {
 		this.state.obsidianDeltaLink = deltaLink;
 	}
 
+	resetObsidianDeltaLink(): void {
+		this.state.obsidianDeltaLink = undefined;
+	}
+
 	/**
 	 * Get file state
 	 */
@@ -322,6 +326,10 @@ export class SyncStateManager {
 	 */
 	setFolderState(oneDriveId: string, vaultPath: string): void {
 		if (!oneDriveId) return;
+		const previousIdForPath = this.folderPathToId.get(vaultPath);
+		if (previousIdForPath && previousIdForPath !== oneDriveId) {
+			this.state.folderStates.delete(previousIdForPath);
+		}
 		const previousPath = this.state.folderStates.get(oneDriveId);
 		if (
 			previousPath &&
@@ -426,5 +434,12 @@ export class SyncStateManager {
 		this.state.fileStates.clear();
 		this.oneDriveIdToPath.clear();
 		logger.debug('Tracked file states cleared');
+	}
+
+	/** Wipe all tracked folder states and their path index. */
+	clearFolderStates(): void {
+		this.state.folderStates.clear();
+		this.folderPathToId.clear();
+		logger.debug('Tracked folder states cleared');
 	}
 }

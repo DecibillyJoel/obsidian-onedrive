@@ -1,6 +1,8 @@
 # Obsidian OneDrive Sync
 
-[![CI](https://github.com/jeffsteinbok/obsidian-onedrive/actions/workflows/ci.yml/badge.svg)](https://github.com/jeffsteinbok/obsidian-onedrive/actions/workflows/ci.yml)
+> **Note:** This is a fork, maintained at [DecibillyJoel/obsidian-onedrive](https://github.com/DecibillyJoel/obsidian-onedrive). The original plugin is [JeffSteinbok/obsidian-onedrive](https://github.com/JeffSteinbok/obsidian-onedrive) by Jeff Steinbok. This fork adds local changes and is not affiliated with the upstream author.
+
+[![CI](https://github.com/DecibillyJoel/obsidian-onedrive/actions/workflows/ci.yml/badge.svg)](https://github.com/DecibillyJoel/obsidian-onedrive/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Obsidian](https://img.shields.io/badge/Obsidian-Plugin-purple)](https://obsidian.md/plugins?id=onedrive-sync)
 
@@ -48,12 +50,12 @@ Sync your Obsidian vault with **OneDrive**. Zero-config for personal Microsoft a
 ### Via BRAT (Beta Testing)
 
 1. Install [BRAT](https://github.com/TfTHacker/obsidian42-brat) from Community Plugins
-2. BRAT settings → **Add Beta Plugin** → `JeffSteinbok/obsidian-onedrive`
+2. BRAT settings → **Add Beta Plugin** → `DecibillyJoel/obsidian-onedrive`
 3. To receive pre-release builds, enable **"Enable beta versions"** in the Add Beta Plugin dialog (BRAT installs only the latest full release otherwise). You can toggle this later per-plugin in BRAT's settings.
 
 ### Manual
 
-1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/JeffSteinbok/obsidian-onedrive/releases)
+1. Download `main.js` and `manifest.json` from the [latest release](https://github.com/DecibillyJoel/obsidian-onedrive/releases)
 2. Place them in `.obsidian/plugins/onedrive-sync/`
 3. Enable the plugin in Settings → Community Plugins
 

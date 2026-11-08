@@ -55,6 +55,7 @@ interface OneDrivePlugin extends Plugin {
 	onPluginDataSyncChanged(enabled: boolean): Promise<void>;
 	onCssSnippetSyncChanged(enabled: boolean): Promise<void>;
 	onBookmarkSyncChanged(enabled: boolean): Promise<void>;
+	onSyncAllHiddenFilesChanged(enabled: boolean): Promise<void>;
 	resetSyncToken(): Promise<void>;
 	reconcileFromCloud(): Promise<void>;
 	reconcileToCloud(): Promise<void>;
@@ -302,6 +303,14 @@ export class OneDriveSettingTab extends PluginSettingTab {
 							key: 'bookmarks',
 						},
 					},
+					{
+						name: t('settings.sync.allHiddenFiles.name'),
+						desc: t('settings.sync.allHiddenFiles.desc', { configDir: this.app.vault.configDir }),
+						control: {
+							type: 'toggle',
+							key: 'allHiddenFiles',
+						},
+					},
 				],
 			},
 			{
@@ -441,6 +450,8 @@ export class OneDriveSettingTab extends PluginSettingTab {
 				return this.plugin.settings.syncCssSnippets;
 			case 'bookmarks':
 				return this.plugin.settings.syncBookmarks;
+			case 'allHiddenFiles':
+				return this.plugin.settings.syncAllHiddenFiles;
 			case 'logLevel':
 				return this.plugin.settings.logLevel;
 			case 'useCustomClientId':
@@ -508,6 +519,9 @@ export class OneDriveSettingTab extends PluginSettingTab {
 				return;
 			case 'bookmarks':
 				await this.plugin.onBookmarkSyncChanged(Boolean(value));
+				return;
+			case 'allHiddenFiles':
+				await this.plugin.onSyncAllHiddenFilesChanged(Boolean(value));
 				return;
 			case 'logLevel':
 				if (isOneOf(value, LOG_LEVEL_VALUES)) {
@@ -976,7 +990,7 @@ export class OneDriveSettingTab extends PluginSettingTab {
 		setting.descEl.appendText(` ${t('settings.advanced.customClientId.helpPrefix')}`);
 		setting.descEl.createEl('a', {
 			text: t('settings.advanced.customClientId.helpLink'),
-			href: 'https://github.com/jeffsteinbok/obsidian-onedrive#custom-client-id',
+			href: 'https://github.com/DecibillyJoel/obsidian-onedrive#custom-client-id',
 			attr: { target: '_blank' },
 		});
 		setting.descEl.appendText(` ${t('settings.advanced.customClientId.helpSuffix')}`);
@@ -1330,6 +1344,15 @@ export class OneDriveSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.syncBookmarks).onChange(async (value) => {
 					await this.plugin.onBookmarkSyncChanged(value);
+				})
+			);
+
+		new Setting(containerEl)
+			.setName(t('settings.sync.allHiddenFiles.name'))
+			.setDesc(t('settings.sync.allHiddenFiles.desc', { configDir }))
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.syncAllHiddenFiles).onChange(async (value) => {
+					await this.plugin.onSyncAllHiddenFilesChanged(value);
 				})
 			);
 	}
