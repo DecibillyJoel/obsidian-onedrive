@@ -74,6 +74,7 @@ import {
 	SyncEngineOptions,
 	SyncEngineConflictQueue,
 	NotificationLevel,
+	PluginUpdateResult,
 } from '../types';
 import { logger } from '../utils/logger';
 import { isDeferrableError } from '../utils/errors';
@@ -3105,6 +3106,163 @@ export class SyncEngine {
 			new Notice(t('notices.reconcile.failed', { message: String(error) }));
 			throw error;
 		}
+	}
+
+	/**
+	 * Pull cloud copies of installed plugins that are not synced locally yet.
+	 *
+	 * Moves bytes only. This method never clears a file state and never
+	 * advances the delta cursor, so the next regular sync still sees these
+	 * files. Callers reload plugins from `result.updated` themselves.
+	 */
+	async pullPluginUpdates(): Promise<PluginUpdateResult> {
+		const result: PluginUpdateResult = {
+			updated: [],
+			downloadedPaths: [],
+			skippedOwnFolder: false,
+		};
+
+		const pluginsPrefix = `${normalizePath(this.configDir)}/plugins/`;
+		const ownFolderPrefix = `${pluginsPrefix}onedrive-sync/`;
+		const ignoreMatchers = await this.loadIgnoreMatchers();
+		const allRemoteItems = await this.oneDriveClient.listAllItems(this.remoteRoot);
+
+		const remoteFiles = new Map<string, OneDriveItem>();
+		for (const item of allRemoteItems) {
+			const vaultPath = this.remotePathToVaultPath(item);
+			if (!vaultPath.startsWith(pluginsPrefix)) {
+				continue;
+			}
+			if (item.folder) {
+				continue;
+			}
+			if (this.shouldIgnorePath(vaultPath, ignoreMatchers)) {
+				continue;
+			}
+			remoteFiles.set(vaultPath, item);
+		}
+
+		let ownFolderUpdateAllowed = false;
+		const hasOwnFolderFiles = [...remoteFiles.keys()].some((path) =>
+			path.startsWith(ownFolderPrefix)
+		);
+		if (hasOwnFolderFiles) {
+			const remoteManifest = remoteFiles.get(`${ownFolderPrefix}manifest.json`);
+			let remoteVersion: string | undefined;
+			if (this.pluginVersion !== 'unknown' && remoteManifest?.id) {
+				try {
+					const manifestContent = await this.fileOps.downloadFile(remoteManifest.id);
+					const parsed = JSON.parse(
+						new TextDecoder().decode(manifestContent)
+					) as { version?: unknown };
+					if (typeof parsed.version === 'string') {
+						remoteVersion = parsed.version;
+					}
+				} catch (error) {
+					logger.warn('Failed to read the remote plugin manifest:', error);
+				}
+			}
+			ownFolderUpdateAllowed =
+				remoteVersion !== undefined &&
+				this.isNewerPluginVersion(remoteVersion, this.pluginVersion);
+			if (!ownFolderUpdateAllowed) {
+				result.skippedOwnFolder = true;
+			}
+		}
+
+		const toDownload: Array<{ vaultPath: string; item: OneDriveItem }> = [];
+		for (const [vaultPath, item] of remoteFiles) {
+			if (vaultPath.startsWith(ownFolderPrefix)) {
+				if (!ownFolderUpdateAllowed) {
+					continue;
+				}
+				if (vaultPath === `${ownFolderPrefix}data.json`) {
+					continue;
+				}
+			}
+			if (!item.id) {
+				continue;
+			}
+
+			let localSize: number | undefined;
+			let localMtime = 0;
+			const abstractFile = this.app.vault.getAbstractFileByPath(vaultPath);
+			if (abstractFile instanceof TFile) {
+				localSize = abstractFile.stat.size;
+				localMtime = abstractFile.stat.mtime;
+			} else {
+				const localStat = await this.app.vault.adapter.stat(vaultPath);
+				if (localStat) {
+					localSize = localStat.size;
+					localMtime = localStat.mtime;
+				}
+			}
+
+			if (localSize === undefined) {
+				toDownload.push({ vaultPath, item });
+				continue;
+			}
+			if (item.size !== undefined && item.size !== localSize) {
+				toDownload.push({ vaultPath, item });
+				continue;
+			}
+			const remoteMtime = Date.parse(item.lastModifiedDateTime);
+			if (!Number.isNaN(remoteMtime) && remoteMtime > localMtime) {
+				toDownload.push({ vaultPath, item });
+			}
+		}
+
+		const foldersToCreate = [
+			...new Set(toDownload.map(({ vaultPath }) => getParentPath(vaultPath))),
+		].filter((path) => path.length > 0);
+		await this.createMissingLocalFolders(foldersToCreate);
+
+		const adapter = this.app.vault.adapter;
+		for (const { vaultPath, item } of toDownload) {
+			try {
+				const content = await this.fileOps.downloadFile(item.id);
+				this.eventManager.markOwnWrites([vaultPath]);
+				await adapter.writeBinary(vaultPath, content);
+			} catch (error) {
+				this.eventManager.removeOwnWrite(vaultPath);
+				logger.warn(`Failed to pull plugin file ${vaultPath}:`, error);
+				continue;
+			}
+			result.downloadedPaths.push(vaultPath);
+			const pluginId = vaultPath.substring(pluginsPrefix.length).split('/')[0];
+			if (pluginId && !result.updated.includes(pluginId)) {
+				result.updated.push(pluginId);
+			}
+		}
+
+		if (result.downloadedPaths.length > 0) {
+			logger.info(`Pulled ${result.downloadedPaths.length} plugin files from the cloud`);
+		}
+
+		return result;
+	}
+
+	/**
+	 * Compare two dotted plugin versions. Returns true only when
+	 * `remoteVersion` is strictly higher than `runningVersion`.
+	 */
+	private isNewerPluginVersion(remoteVersion: string, runningVersion: string): boolean {
+		const parse = (value: string): number[] =>
+			value
+				.split('.')
+				.map((part) => Number.parseInt(part, 10))
+				.map((part) => (Number.isNaN(part) ? 0 : part));
+		const remote = parse(remoteVersion);
+		const running = parse(runningVersion);
+		const length = Math.max(remote.length, running.length);
+		for (let index = 0; index < length; index++) {
+			const remotePart = remote[index] ?? 0;
+			const runningPart = running[index] ?? 0;
+			if (remotePart !== runningPart) {
+				return remotePart > runningPart;
+			}
+		}
+		return false;
 	}
 
 	/**

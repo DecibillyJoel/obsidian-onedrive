@@ -169,6 +169,18 @@ export interface SyncOperation {
 	trackRemoteId?: boolean;
 }
 
+/**
+ * Outcome of pulling unsynced files for installed plugins.
+ */
+export interface PluginUpdateResult {
+	/** Plugin ids (folder names under `<configDir>/plugins/`) that changed on disk */
+	updated: string[];
+	/** Vault paths written in this pull */
+	downloadedPaths: string[];
+	/** True when the own plugin folder was left alone */
+	skippedOwnFolder: boolean;
+}
+
 export interface LargeDeleteWarningInfo {
 	localDeleteCount: number; // files about to be deleted from the local vault (driven by remote)
 	remoteDeleteCount: number; // files about to be deleted from OneDrive (driven by local)
