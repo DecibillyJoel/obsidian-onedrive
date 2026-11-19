@@ -59,6 +59,7 @@ interface OneDrivePlugin extends Plugin {
 	resetSyncToken(): Promise<void>;
 	reconcileFromCloud(): Promise<void>;
 	reconcileToCloud(): Promise<void>;
+	pullPluginUpdates(): Promise<void>;
 	authenticate(): Promise<void>;
 	disconnect(): Promise<void>;
 	triggerManualSync(): Promise<void>;
@@ -276,6 +277,13 @@ export class OneDriveSettingTab extends PluginSettingTab {
 						control: {
 							type: 'toggle',
 							key: 'pluginManifests',
+						},
+					},
+					{
+						name: t('settings.sync.pluginUpdates.name'),
+						desc: t('settings.sync.pluginUpdates.desc'),
+						render: (setting) => {
+							this.renderPluginUpdatesSetting(setting);
 						},
 					},
 					{
@@ -957,6 +965,17 @@ export class OneDriveSettingTab extends PluginSettingTab {
 			);
 	}
 
+	private renderPluginUpdatesSetting(setting: Setting): void {
+		setting
+			.setName(t('settings.sync.pluginUpdates.name'))
+			.setDesc(t('settings.sync.pluginUpdates.desc'))
+			.addButton((button) =>
+				button.setButtonText(t('settings.sync.pluginUpdates.button')).onClick(async () => {
+					await this.plugin.pullPluginUpdates();
+				})
+			);
+	}
+
 	private renderReconcileToCloudSetting(setting: Setting): void {
 		setting
 			.setName(t('settings.advanced.reconcileToCloud.name'))
@@ -1314,6 +1333,15 @@ export class OneDriveSettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.syncPluginManifests).onChange(async (value) => {
 					await this.plugin.onPluginManifestSyncChanged(value);
 					this.renderSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName(t('settings.sync.pluginUpdates.name'))
+			.setDesc(t('settings.sync.pluginUpdates.desc'))
+			.addButton((button) =>
+				button.setButtonText(t('settings.sync.pluginUpdates.button')).onClick(async () => {
+					await this.plugin.pullPluginUpdates();
 				})
 			);
 

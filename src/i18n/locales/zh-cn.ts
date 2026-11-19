@@ -119,6 +119,20 @@ export const zhCn = {
 			complete: '强制上传本地完成：已上传 {{uploaded}}，已删除 {{deleted}}，已刷新 {{refreshed}}。',
 			failed: '强制上传本地失败：{{message}}',
 		},
+		pluginUpdates: {
+			notConnected: '插件更新：尚未连接 OneDrive。',
+			selectFolderFirst: '插件更新：请先在设置中选择同步文件夹。',
+			engineNotInitialized: '插件更新：同步引擎尚未就绪。',
+			alreadyInProgress: '插件更新：同步正在进行。',
+			ownFolderSkipped: '插件更新：onedrive-sync 插件文件夹未更新。',
+			upToDate: '插件更新：未下载任何插件文件。',
+			plugin: '个插件',
+			plugins: '个插件',
+			summary: '插件更新：已更新 {{pluginCount}} {{pluginLabel}}（已下载 {{fileCount}} {{fileLabel}}）。',
+			reloaded: '插件更新：已重新加载 {{names}}。',
+			reloadFailed: '插件更新：无法重新加载 {{names}}。',
+			failed: '插件更新失败：{{message}}',
+		},
 		dev: {
 			noFileFound: 'OneDrive 开发：未找到可用于创建测试冲突的文件',
 			createdTestConflict: 'OneDrive 开发：已为“{{path}}”创建测试冲突',
@@ -296,6 +310,11 @@ export const zhCn = {
 			plugins: {
 				name: '同步插件',
 				desc: '同步 {{configDir}}/community-plugins.json、{{configDir}}/core-plugins.json、插件清单和插件文件（main.js、styles.css）。',
+			},
+			pluginUpdates: {
+				name: '检查插件更新',
+				desc: '从 OneDrive 拉取未同步的插件文件，然后重新加载已更改的插件。',
+				button: '立即检查',
 			},
 			pluginData: {
 				name: '同步插件数据',

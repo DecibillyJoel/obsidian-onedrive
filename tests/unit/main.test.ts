@@ -38,7 +38,14 @@ const mocks = vi.hoisted(() => {
 
 	const syncEngine = {
 		performSync: vi.fn().mockResolvedValue(undefined),
+		pullPluginUpdates: vi.fn().mockResolvedValue({
+			updated: [],
+			downloadedPaths: [],
+			skippedOwnFolder: false,
+		}),
 	};
+
+	const reloadPlugins = vi.fn().mockResolvedValue({ reloaded: [], failed: [] });
 
 	const syncStateManager = {
 		loadState: vi.fn(),
@@ -97,6 +104,7 @@ const mocks = vi.hoisted(() => {
 		eventManager,
 		statusBarManager,
 		deviceCodeModal,
+		reloadPlugins,
 		TokenStorage: vi.fn().mockImplementation(function () {
 			return tokenStorage;
 		}),
@@ -203,7 +211,13 @@ vi.mock('../../src/ui/authModal', () => ({
 	DeviceCodeModal: mocks.DeviceCodeModal,
 }));
 
+vi.mock('../../src/utils/pluginReload', () => ({
+	reloadPlugins: mocks.reloadPlugins,
+}));
+
+
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { noticeMessages } from 'obsidian';
 import OneDriveSyncPlugin from '../../src/main';
 import { DEFAULT_SETTINGS, OneDriveAccessMode } from '../../src/types';
 
@@ -903,6 +917,176 @@ describe('OneDriveSyncPlugin', () => {
 		await plugin.saveSettings();
 
 		expect(mocks.eventManager.setFileChangeSyncDelay).toHaveBeenLastCalledWith(10000);
+	});
+
+	describe('pullPluginUpdates', () => {
+		const configureSync = () => {
+			mocks.tokenStorage.hasTokens.mockReturnValue(true);
+			plugin.settings.accessMode = OneDriveAccessMode.FULL_ACCESS;
+			plugin.settings.remotePath = '/Vault';
+			(plugin as any).syncEngine = mocks.syncEngine;
+			(plugin as any).eventManager = mocks.eventManager;
+		};
+
+		beforeEach(async () => {
+			noticeMessages.length = 0;
+			mocks.reloadPlugins.mockReset();
+			mocks.reloadPlugins.mockResolvedValue({ reloaded: [], failed: [] });
+			mocks.syncEngine.pullPluginUpdates.mockReset();
+			mocks.syncEngine.pullPluginUpdates.mockResolvedValue({
+				updated: [],
+				downloadedPaths: [],
+				skippedOwnFolder: false,
+			});
+			await plugin.onload();
+		});
+
+		it('returns early when no tokens are available', async () => {
+			mocks.tokenStorage.hasTokens.mockReturnValue(false);
+
+			await plugin.pullPluginUpdates();
+
+			expect(mocks.syncEngine.pullPluginUpdates).not.toHaveBeenCalled();
+			expect(mocks.reloadPlugins).not.toHaveBeenCalled();
+			expect(noticeMessages).toContain('Plugin updates: not connected to OneDrive.');
+		});
+
+		it('returns early when no sync folder is configured', async () => {
+			configureSync();
+			plugin.settings.remotePath = undefined;
+
+			await plugin.pullPluginUpdates();
+
+			expect(mocks.syncEngine.pullPluginUpdates).not.toHaveBeenCalled();
+			expect(noticeMessages).toContain(
+				'Plugin updates: select a sync folder in settings first.'
+			);
+		});
+
+		it('returns early when the sync engine is missing', async () => {
+			configureSync();
+			(plugin as any).syncEngine = undefined;
+
+			await plugin.pullPluginUpdates();
+
+			expect(mocks.reloadPlugins).not.toHaveBeenCalled();
+			expect(noticeMessages).toContain('Plugin updates: the sync engine is not ready.');
+		});
+
+		it('returns early when a sync is already in progress', async () => {
+			configureSync();
+			mocks.eventManager.isSyncInProgress.mockReturnValue(true);
+
+			await plugin.pullPluginUpdates();
+
+			expect(mocks.syncEngine.pullPluginUpdates).not.toHaveBeenCalled();
+			expect(noticeMessages).toContain('Plugin updates: a sync is already in progress.');
+		});
+
+		it('pulls plugin files, then reloads the changed plugins with the self id', async () => {
+			configureSync();
+			mocks.syncEngine.pullPluginUpdates.mockResolvedValue({
+				updated: ['dataview', 'onedrive-sync'],
+				downloadedPaths: [
+					'.obsidian/plugins/dataview/main.js',
+					'.obsidian/plugins/dataview/manifest.json',
+					'.obsidian/plugins/onedrive-sync/main.js',
+				],
+				skippedOwnFolder: false,
+			});
+			mocks.reloadPlugins.mockResolvedValue({
+				reloaded: ['dataview', 'onedrive-sync'],
+				failed: [],
+			});
+
+			await plugin.pullPluginUpdates();
+
+			expect(mocks.syncEngine.pullPluginUpdates).toHaveBeenCalledTimes(1);
+			expect(mocks.reloadPlugins).toHaveBeenCalledTimes(1);
+			expect(mocks.reloadPlugins).toHaveBeenCalledWith(
+				(plugin as any).app,
+				['dataview', 'onedrive-sync'],
+				'onedrive-sync'
+			);
+			expect(noticeMessages).toContain(
+				'Plugin updates: 2 plugins updated (3 files downloaded).'
+			);
+			expect(noticeMessages).toContain(
+				'Plugin updates: reloaded dataview, onedrive-sync.'
+			);
+			expect((plugin as any).isSyncing).toBe(false);
+		});
+
+		it('uses singular labels for one plugin and one file', async () => {
+			configureSync();
+			mocks.syncEngine.pullPluginUpdates.mockResolvedValue({
+				updated: ['dataview'],
+				downloadedPaths: ['.obsidian/plugins/dataview/main.js'],
+				skippedOwnFolder: false,
+			});
+
+			await plugin.pullPluginUpdates();
+
+			expect(noticeMessages).toContain(
+				'Plugin updates: 1 plugin updated (1 file downloaded).'
+			);
+		});
+
+		it('reports the own folder as not updated when the pull skipped it', async () => {
+			configureSync();
+			mocks.syncEngine.pullPluginUpdates.mockResolvedValue({
+				updated: [],
+				downloadedPaths: [],
+				skippedOwnFolder: true,
+			});
+
+			await plugin.pullPluginUpdates();
+
+			expect(noticeMessages).toContain(
+				'Plugin updates: the onedrive-sync plugin folder was not updated.'
+			);
+			expect(noticeMessages).toContain('Plugin updates: no plugin files were downloaded.');
+			expect(mocks.reloadPlugins).not.toHaveBeenCalled();
+		});
+
+		it('does not reload plugins when nothing changed', async () => {
+			configureSync();
+
+			await plugin.pullPluginUpdates();
+
+			expect(noticeMessages).toContain('Plugin updates: no plugin files were downloaded.');
+			expect(mocks.reloadPlugins).not.toHaveBeenCalled();
+		});
+
+		it('reports plugins that failed to reload', async () => {
+			configureSync();
+			mocks.syncEngine.pullPluginUpdates.mockResolvedValue({
+				updated: ['dataview'],
+				downloadedPaths: ['.obsidian/plugins/dataview/main.js'],
+				skippedOwnFolder: false,
+			});
+			mocks.reloadPlugins.mockResolvedValue({
+				reloaded: [],
+				failed: [{ id: 'dataview', error: 'boom' }],
+			});
+
+			await plugin.pullPluginUpdates();
+
+			expect(noticeMessages).toContain(
+				'Plugin updates: could not reload dataview.'
+			);
+		});
+
+		it('reports a failed pull without throwing', async () => {
+			configureSync();
+			mocks.syncEngine.pullPluginUpdates.mockRejectedValue(new Error('boom'));
+
+			await expect(plugin.pullPluginUpdates()).resolves.toBeUndefined();
+
+			expect(noticeMessages).toContain('Plugin updates failed: boom');
+			expect(mocks.reloadPlugins).not.toHaveBeenCalled();
+			expect((plugin as any).isSyncing).toBe(false);
+		});
 	});
 
 });

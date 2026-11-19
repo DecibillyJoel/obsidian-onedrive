@@ -125,6 +125,21 @@ export const en = {
 				'Force upload local complete: {{uploaded}} uploaded, {{deleted}} deleted, {{refreshed}} refreshed.',
 			failed: 'Force upload local failed: {{message}}',
 		},
+		pluginUpdates: {
+			notConnected: 'Plugin updates: not connected to OneDrive.',
+			selectFolderFirst: 'Plugin updates: select a sync folder in settings first.',
+			engineNotInitialized: 'Plugin updates: the sync engine is not ready.',
+			alreadyInProgress: 'Plugin updates: a sync is already in progress.',
+			ownFolderSkipped: 'Plugin updates: the onedrive-sync plugin folder was not updated.',
+			upToDate: 'Plugin updates: no plugin files were downloaded.',
+			plugin: 'plugin',
+			plugins: 'plugins',
+			summary:
+				'Plugin updates: {{pluginCount}} {{pluginLabel}} updated ({{fileCount}} {{fileLabel}} downloaded).',
+			reloaded: 'Plugin updates: reloaded {{names}}.',
+			reloadFailed: 'Plugin updates: could not reload {{names}}.',
+			failed: 'Plugin updates failed: {{message}}',
+		},
 		dev: {
 			noFileFound: 'OneDrive DEV: No file found to create a test conflict',
 			createdTestConflict: 'OneDrive DEV: Created test conflict for "{{path}}"',
@@ -303,6 +318,11 @@ export const en = {
 			plugins: {
 				name: 'Sync plugins',
 				desc: 'Sync {{configDir}}/community-plugins.json, {{configDir}}/core-plugins.json, plugin manifests, and plugin binaries (main.js, styles.css).',
+			},
+			pluginUpdates: {
+				name: 'Check for plugin updates',
+				desc: 'Pull unsynced plugin files from OneDrive, then reload the plugins that changed.',
+				button: 'Check now',
 			},
 			pluginData: {
 				name: 'Sync plugin data',

@@ -24,6 +24,7 @@ import {
 	ensureSelfInCommunityPluginsList as guardCommunityPluginsList,
 	type CommunityPluginsAdapter,
 } from './utils/pluginListGuard';
+import { reloadPlugins } from './utils/pluginReload';
 
 // Auth
 import { TokenStorage } from './auth/tokenStorage';
@@ -1407,6 +1408,88 @@ export default class OneDriveSyncPlugin extends Plugin {
 		} catch (error) {
 			this.setSyncStatus(SyncStatus.ERROR);
 			throw error;
+		} finally {
+			this.isSyncing = false;
+		}
+	}
+
+	/**
+	 * Pull unsynced plugin files from OneDrive, then reload the plugins that
+	 * changed. The plugin reload includes this plugin, so the settings tab can
+	 * offer a plain "check for updates" button.
+	 */
+	async pullPluginUpdates(): Promise<void> {
+		if (!this.tokenStorage.hasTokens()) {
+			new Notice(t('notices.pluginUpdates.notConnected'));
+			return;
+		}
+		if (!this.isSyncConfigured()) {
+			new Notice(t('notices.pluginUpdates.selectFolderFirst'));
+			return;
+		}
+		if (!this.syncEngine) {
+			new Notice(t(this.isInitializing ? 'notices.sync.initializing' : 'notices.pluginUpdates.engineNotInitialized'));
+			return;
+		}
+		if (this.isSyncing || this.eventManager?.isSyncInProgress()) {
+			new Notice(t('notices.pluginUpdates.alreadyInProgress'));
+			return;
+		}
+
+		this.isSyncing = true;
+		try {
+			this.setSyncStatus(SyncStatus.SYNCING);
+			const result = await this.syncEngine.pullPluginUpdates();
+			if (result.skippedOwnFolder) {
+				new Notice(t('notices.pluginUpdates.ownFolderSkipped'));
+			}
+			if (result.updated.length === 0) {
+				new Notice(t('notices.pluginUpdates.upToDate'));
+				this.setSyncStatus(SyncStatus.IDLE);
+				return;
+			}
+
+			// One plugin can bring several files, and a plugin counts as updated
+			// when its first file arrives. Report both counts, not a success claim.
+			new Notice(
+				t('notices.pluginUpdates.summary', {
+					pluginCount: result.updated.length,
+					pluginLabel: t(
+						result.updated.length === 1
+							? 'notices.pluginUpdates.plugin'
+							: 'notices.pluginUpdates.plugins'
+					),
+					fileCount: result.downloadedPaths.length,
+					fileLabel: t(
+						result.downloadedPaths.length === 1 ? 'notices.sync.file' : 'notices.sync.files'
+					),
+				})
+			);
+
+			const reloadResult = await reloadPlugins(
+				this.app,
+				result.updated,
+				this.manifest.id
+			);
+			if (reloadResult.reloaded.length > 0) {
+				new Notice(
+					t('notices.pluginUpdates.reloaded', {
+						names: reloadResult.reloaded.join(', '),
+					})
+				);
+			}
+			if (reloadResult.failed.length > 0) {
+				new Notice(
+					t('notices.pluginUpdates.reloadFailed', {
+						names: reloadResult.failed.map((failure) => failure.id).join(', '),
+					})
+				);
+			}
+			this.setSyncStatus(SyncStatus.IDLE);
+		} catch (error) {
+			this.setSyncStatus(SyncStatus.ERROR);
+			const errorMsg = error instanceof Error ? error.message : t('notices.common.unknownError');
+			new Notice(t('notices.pluginUpdates.failed', { message: errorMsg }));
 		} finally {
 			this.isSyncing = false;
 		}

@@ -19,10 +19,12 @@ export class Plugin {
 }
 export class PluginSettingTab {}
 export class Setting {}
+export const noticeMessages: string[] = [];
 export class Notice {
 	message: string;
 	constructor(message: string, _timeout?: number) {
 		this.message = message;
+		noticeMessages.push(message);
 	}
 	setMessage(message: string) { this.message = message; }
 	hide() {}
