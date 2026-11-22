@@ -6,6 +6,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { App } from 'obsidian';
 import { reloadPlugins } from '../../../src/utils/pluginReload';
 import { timerApi } from '../../../src/utils/timerApi';
+import { logger } from '../../../src/utils/logger';
 
 interface FakePluginManager {
 	disablePlugin: ReturnType<typeof vi.fn>;
@@ -30,6 +31,11 @@ function makeManager(calls: string[] = []): FakePluginManager {
 
 function makeApp(plugins?: unknown): App {
 	return { plugins } as unknown as App;
+}
+
+/** Let every queued microtask run. */
+async function flushMicrotasks(): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe('reloadPlugins', () => {
@@ -108,6 +114,33 @@ describe('reloadPlugins', () => {
 		expect(result.failed).toEqual([]);
 	});
 
+	it('awaits a pending loadManifests before it calls enable', async () => {
+		const calls: string[] = [];
+		const manager = makeManager(calls);
+		let resolveManifests: (() => void) | undefined;
+		manager.loadManifests.mockImplementation(
+			() =>
+				new Promise<void>((resolve) => {
+					calls.push('loadManifests');
+					resolveManifests = resolve;
+				})
+		);
+
+		const pending = reloadPlugins(makeApp(manager), ['a']);
+
+		await flushMicrotasks();
+
+		expect(calls).toEqual(['disable:a', 'loadManifests']);
+		expect(manager.enablePlugin).not.toHaveBeenCalled();
+
+		resolveManifests?.();
+		const result = await pending;
+
+		expect(calls).toEqual(['disable:a', 'loadManifests', 'enable:a']);
+		expect(result.reloaded).toEqual(['a']);
+		expect(result.failed).toEqual([]);
+	});
+
 	it('schedules the self id last and counts it as reloaded once scheduled', async () => {
 		const calls: string[] = [];
 		const manager = makeManager(calls);
@@ -128,7 +161,8 @@ describe('reloadPlugins', () => {
 		expect(calls).toEqual(['disable:other', 'loadManifests', 'enable:other']);
 
 		expect(deferred).toBeTypeOf('function');
-		await deferred?.();
+		deferred?.();
+		await flushMicrotasks();
 
 		expect(calls).toEqual([
 			'disable:other',
@@ -138,6 +172,39 @@ describe('reloadPlugins', () => {
 			'loadManifests',
 			'enable:self',
 		]);
+	});
+
+	it('does not leak an unhandled rejection when the self reload log call throws', async () => {
+		const calls: string[] = [];
+		const manager = makeManager(calls);
+		let deferred: (() => void | Promise<void>) | undefined;
+		vi.spyOn(timerApi, 'setTimeout').mockImplementation(
+			(handler: () => void) => {
+				deferred = handler;
+				return 0;
+			}
+		);
+		manager.enablePlugin.mockRejectedValue(new Error('enable exploded'));
+		const logError = vi.spyOn(logger, 'error').mockImplementation(() => {
+			throw new Error('log sink exploded');
+		});
+		const unhandled = vi.fn();
+		process.on('unhandledRejection', unhandled);
+
+		try {
+			const result = await reloadPlugins(makeApp(manager), ['self'], 'self');
+
+			expect(result.reloaded).toEqual(['self']);
+			expect(deferred).toBeTypeOf('function');
+			expect(() => deferred?.()).not.toThrow();
+
+			await flushMicrotasks();
+
+			expect(logError).toHaveBeenCalledTimes(1);
+			expect(unhandled).not.toHaveBeenCalled();
+		} finally {
+			process.off('unhandledRejection', unhandled);
+		}
 	});
 
 	it('keeps reloading after one id throws', async () => {
@@ -163,27 +230,40 @@ describe('reloadPlugins', () => {
 		]);
 	});
 
-	it('ignores an id whose enable resolves false', async () => {
+	it('records nothing for an id whose enable reports it is not installed', async () => {
 		const calls: string[] = [];
 		const manager = makeManager(calls);
-		manager.enablePlugin.mockImplementation(async (id: string) => {
+		manager.enablePlugin.mockImplementation((id: string) => {
 			calls.push(`enable:${id}`);
-			return id !== 'missing';
+			return Promise.resolve(id !== 'missing');
 		});
 
-		const result = await reloadPlugins(makeApp(manager), ['missing']);
+		const result = await reloadPlugins(makeApp(manager), ['missing', 'present']);
 
-		expect(result.reloaded).toEqual([]);
+		expect(manager.enablePlugin).toHaveBeenCalledWith('missing');
+		expect(manager.enablePlugin).toHaveBeenCalledWith('present');
+		expect(result.reloaded).toEqual(['present']);
 		expect(result.failed).toEqual([]);
+		expect(calls).toEqual([
+			'disable:missing',
+			'loadManifests',
+			'enable:missing',
+			'disable:present',
+			'loadManifests',
+			'enable:present',
+		]);
 	});
 
-	it('treats a promise of false from enable as not reloaded', async () => {
-		const manager = makeManager();
-		manager.enablePlugin.mockImplementation(() => Promise.resolve(false));
+	it('does not schedule a self reload when ids omits the self id', async () => {
+		const calls: string[] = [];
+		const manager = makeManager(calls);
+		const timeoutSpy = vi.spyOn(timerApi, 'setTimeout');
 
-		const result = await reloadPlugins(makeApp(manager), ['uninstalled']);
+		const result = await reloadPlugins(makeApp(manager), ['other'], 'self');
 
-		expect(result.reloaded).toEqual([]);
+		expect(result.reloaded).toEqual(['other']);
 		expect(result.failed).toEqual([]);
+		expect(timeoutSpy).not.toHaveBeenCalled();
+		expect(calls).toEqual(['disable:other', 'loadManifests', 'enable:other']);
 	});
 });

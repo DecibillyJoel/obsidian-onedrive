@@ -101,14 +101,16 @@ export async function reloadPlugins(
 	}
 
 	if (selfId && ids.includes(selfId)) {
-		timerApi.setTimeout(async () => {
-			try {
-				await reloadOne(plugins, selfId);
-			} catch (error) {
-				logger.error(
-					`Failed to reload plugin ${selfId}: ${describeError(error)}`
-				);
-			}
+		timerApi.setTimeout(() => {
+			void reloadOne(plugins, selfId).catch((error: unknown) => {
+				try {
+					logger.error(
+						`Failed to reload plugin ${selfId}: ${describeError(error)}`
+					);
+				} catch {
+					// A throwing log call must not become an unhandled rejection.
+				}
+			});
 		}, 0);
 		result.reloaded.push(selfId);
 	}
