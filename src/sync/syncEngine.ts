@@ -2757,6 +2757,15 @@ export class SyncEngine {
 		return toVaultPath(fullPath, this.remoteRootOnDrive);
 	}
 
+	/**
+	 * True when a remote-derived path could escape the vault root: it is
+	 * absolute, or any segment walks up with `..`.
+	 */
+	private isUnsafeRemotePath(vaultPath: string): boolean {
+		if (vaultPath.startsWith('/')) return true;
+		return vaultPath.split('/').some((segment) => segment === '..');
+	}
+
 	private realignRemoteRoot(fullPath: string): string {
 		const normalizedPath = normalizePath(fullPath);
 		const normalizedRoot = normalizePath(this.remoteRootOnDrive);
@@ -3114,6 +3123,9 @@ export class SyncEngine {
 	 * Moves bytes only. This method never clears a file state and never
 	 * advances the delta cursor, so the next regular sync still sees these
 	 * files. Callers reload plugins from `result.updated` themselves.
+	 *
+	 * The own plugin folder is not updated when the remote version is not
+	 * strictly newer than the running one. See `PluginUpdateResult`.
 	 */
 	async pullPluginUpdates(): Promise<PluginUpdateResult> {
 		const result: PluginUpdateResult = {
@@ -3122,15 +3134,28 @@ export class SyncEngine {
 			skippedOwnFolder: false,
 		};
 
-		const pluginsPrefix = `${normalizePath(this.configDir)}/plugins/`;
+		const pluginsPrefix = `${normalizePath(this.configDir).replace(/\/+$/g, '')}/plugins/`;
 		const ownFolderPrefix = `${pluginsPrefix}onedrive-sync/`;
+		// The pre-rename plugin folder holds stale auth and state, so a pull must
+		// never bring it back. `shouldSyncVaultPath` excludes it for the same reason.
+		const legacyFolderPrefix = `${pluginsPrefix}obsidian-onedrive/`;
 		const ignoreMatchers = await this.loadIgnoreMatchers();
 		const allRemoteItems = await this.oneDriveClient.listAllItems(this.remoteRoot);
 
 		const remoteFiles = new Map<string, OneDriveItem>();
 		for (const item of allRemoteItems) {
 			const vaultPath = this.remotePathToVaultPath(item);
+			if (this.isUnsafeRemotePath(vaultPath)) {
+				logger.warn(`Refusing to pull a remote path that leaves the vault: ${vaultPath}`);
+				continue;
+			}
 			if (!vaultPath.startsWith(pluginsPrefix)) {
+				continue;
+			}
+			// The own folder is updated under its own version gate, and the legacy
+			// folder is never pulled. The user's other sync settings do not apply:
+			// this pull is an explicit, version-gated action of its own.
+			if (vaultPath.startsWith(legacyFolderPrefix)) {
 				continue;
 			}
 			if (item.folder) {
@@ -3166,6 +3191,8 @@ export class SyncEngine {
 				remoteVersion !== undefined &&
 				this.isNewerPluginVersion(remoteVersion, this.pluginVersion);
 			if (!ownFolderUpdateAllowed) {
+				// Not updated: the remote manifest version is equal or older, the
+				// running version is unknown, or the remote manifest was unreadable.
 				result.skippedOwnFolder = true;
 			}
 		}
@@ -3229,7 +3256,13 @@ export class SyncEngine {
 				continue;
 			}
 			result.downloadedPaths.push(vaultPath);
-			const pluginId = vaultPath.substring(pluginsPrefix.length).split('/')[0];
+			const relativePath = vaultPath.substring(pluginsPrefix.length);
+			// A file directly under plugins/ sits in no plugin folder, so its file
+			// name must not become a plugin id.
+			if (!relativePath.includes('/')) {
+				continue;
+			}
+			const pluginId = relativePath.split('/')[0];
 			if (pluginId && !result.updated.includes(pluginId)) {
 				result.updated.push(pluginId);
 			}
@@ -3247,22 +3280,32 @@ export class SyncEngine {
 	 * `remoteVersion` is strictly higher than `runningVersion`.
 	 */
 	private isNewerPluginVersion(remoteVersion: string, runningVersion: string): boolean {
-		const parse = (value: string): number[] =>
-			value
+		const parse = (value: string): { parts: number[]; prerelease: string } => {
+			// Drop build metadata, then split the core version from any
+			// pre-release suffix, e.g. 2.2.0-beta.1 -> 2.2.0 and beta.1.
+			const withoutBuild = value.trim().split('+')[0] ?? '';
+			const dashIndex = withoutBuild.indexOf('-');
+			const core = dashIndex >= 0 ? withoutBuild.substring(0, dashIndex) : withoutBuild;
+			const prerelease = dashIndex >= 0 ? withoutBuild.substring(dashIndex + 1) : '';
+			const parts = core
 				.split('.')
 				.map((part) => Number.parseInt(part, 10))
 				.map((part) => (Number.isNaN(part) ? 0 : part));
+			return { parts, prerelease };
+		};
 		const remote = parse(remoteVersion);
 		const running = parse(runningVersion);
-		const length = Math.max(remote.length, running.length);
+		const length = Math.max(remote.parts.length, running.parts.length);
 		for (let index = 0; index < length; index++) {
-			const remotePart = remote[index] ?? 0;
-			const runningPart = running[index] ?? 0;
+			const remotePart = remote.parts[index] ?? 0;
+			const runningPart = running.parts[index] ?? 0;
 			if (remotePart !== runningPart) {
 				return remotePart > runningPart;
 			}
 		}
-		return false;
+		// Same core version: a pre-release is older than its release, and any
+		// other pre-release pair is not treated as newer (the gate fails closed).
+		return remote.prerelease === '' && running.prerelease !== '';
 	}
 
 	/**

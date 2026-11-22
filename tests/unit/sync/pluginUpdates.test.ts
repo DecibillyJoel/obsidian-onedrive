@@ -25,6 +25,7 @@ import { logger } from '../../../src/utils/logger';
 import { SyncStateManager } from '../../../src/sync/syncState';
 import { ConflictResolver } from '../../../src/sync/conflictResolver';
 import { ConflictResolutionStrategy, OneDriveItem } from '../../../src/types';
+import { shouldSyncVaultPath } from '../../../src/utils/pathUtils';
 
 const CONFIG_DIR = '.obsidian';
 const PLUGINS_DIR = `${CONFIG_DIR}/plugins`;
@@ -105,7 +106,10 @@ describe('SyncEngine.pullPluginUpdates', () => {
 		requeueChanges: Mock;
 	};
 
-	function buildEngine(pluginVersion: string = '2.1.1'): SyncEngine {
+	function buildEngine(
+		pluginVersion: string = '2.1.1',
+		shouldSyncPath?: (path: string) => boolean
+	): SyncEngine {
 		return new SyncEngine(
 			mockApp as any,
 			mockFileOps as any,
@@ -114,7 +118,15 @@ describe('SyncEngine.pullPluginUpdates', () => {
 			new ConflictResolver(ConflictResolutionStrategy.LAST_WRITE_WINS),
 			mockEventManager as any,
 			CONFIG_DIR,
-			{ remoteRoot: REMOTE_ROOT, pluginVersion }
+			{
+				remoteRoot: REMOTE_ROOT,
+				pluginVersion,
+				// Mirror the production wiring in main.ts, where plugin manifests,
+				// data and binaries are in scope.
+				shouldSyncPath:
+					shouldSyncPath ??
+					((path) => shouldSyncVaultPath(path, true, true, CONFIG_DIR, true, true, true)),
+			}
 		);
 	}
 
@@ -410,5 +422,143 @@ describe('SyncEngine.pullPluginUpdates', () => {
 			expect.stringContaining(failedPath),
 			expect.any(Error)
 		);
+	});
+
+	it('leaves the legacy plugin folder alone', async () => {
+		const legacyMain = `${PLUGINS_DIR}/obsidian-onedrive/main.js`;
+		const liveMain = `${PLUGINS_DIR}/alpha/main.js`;
+
+		mockClient.listAllItems.mockResolvedValue([
+			makeRemoteFile(legacyMain, { id: 'legacy-main-id' }),
+			makeRemoteFile(liveMain, { id: 'alpha-main-id' }),
+		]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(mockFileOps.downloadFile).not.toHaveBeenCalledWith('legacy-main-id');
+		expect(result.downloadedPaths).toEqual([liveMain]);
+		expect(result.updated).toEqual(['alpha']);
+	});
+
+	it('pulls a plugin even when the sync settings put plugin paths out of scope', async () => {
+		// The pull is an explicit, version-gated action of its own, so a
+		// shouldSyncPath that refuses every path must not stop it.
+		syncEngine = buildEngine('2.1.1', () => false);
+		const alphaMain = `${PLUGINS_DIR}/alpha/main.js`;
+		mockClient.listAllItems.mockResolvedValue([makeRemoteFile(alphaMain, { id: 'alpha-main-id' })]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(result.downloadedPaths).toEqual([alphaMain]);
+		expect(result.updated).toEqual(['alpha']);
+	});
+
+	it('does not report a plugin id for a file directly under plugins/', async () => {
+		const strayPath = `${PLUGINS_DIR}/stray.json`;
+		syncEngine = buildEngine('2.1.1', () => true);
+
+		mockClient.listAllItems.mockResolvedValue([makeRemoteFile(strayPath, { id: 'stray-id' })]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(result.downloadedPaths).toEqual([strayPath]);
+		expect(result.updated).toEqual([]);
+	});
+
+	it('honours the .syncIgnore matcher', async () => {
+		const ignoredPath = `${PLUGINS_DIR}/alpha/main.js`;
+		const keptPath = `${PLUGINS_DIR}/alpha/styles.css`;
+
+		mockApp.vault.adapter.read.mockResolvedValue(ignoredPath);
+		mockClient.listAllItems.mockResolvedValue([
+			makeRemoteFile(ignoredPath, { id: 'ignored-main-id' }),
+			makeRemoteFile(keptPath, { id: 'kept-css-id' }),
+		]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(mockFileOps.downloadFile).not.toHaveBeenCalledWith('ignored-main-id');
+		expect(result.downloadedPaths).toEqual([keptPath]);
+	});
+
+	it('ignores remote files outside the plugins tree', async () => {
+		mockClient.listAllItems.mockResolvedValue([
+			makeRemoteFile('notes/keep.md', { id: 'note-id' }),
+			makeRemoteFile(`${CONFIG_DIR}/app.json`, { id: 'app-id' }),
+		]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(mockFileOps.downloadFile).not.toHaveBeenCalled();
+		expect(result.downloadedPaths).toEqual([]);
+		expect(result.updated).toEqual([]);
+	});
+
+	it('leaves the own plugin folder alone when the remote manifest is malformed', async () => {
+		mockFileOps.downloadFile.mockResolvedValue(new TextEncoder().encode('not json').buffer);
+		mockClient.listAllItems.mockResolvedValue([
+			makeRemoteFile(`${OWN_FOLDER}/manifest.json`, { id: 'own-manifest-id' }),
+			makeRemoteFile(`${OWN_FOLDER}/main.js`, { id: 'own-main-id' }),
+		]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(mockApp.vault.adapter.writeBinary).not.toHaveBeenCalled();
+		expect(result.downloadedPaths).toEqual([]);
+		expect(result.skippedOwnFolder).toBe(true);
+		expect(logger.warn).toHaveBeenCalledWith(
+			expect.stringContaining('manifest'),
+			expect.any(Error)
+		);
+	});
+
+	it('refuses remote paths that leave the vault', async () => {
+		const traversalPath = `${PLUGINS_DIR}/../escape/main.js`;
+
+		mockClient.listAllItems.mockResolvedValue([
+			makeRemoteFile(traversalPath, { id: 'traversal-id' }),
+			makeRemoteFile(`${PLUGINS_DIR}/alpha/main.js`, {
+				id: 'absolute-id',
+				__resolvedVaultPath: '/etc/passwd',
+			}),
+		]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(mockFileOps.downloadFile).not.toHaveBeenCalled();
+		expect(mockApp.vault.adapter.writeBinary).not.toHaveBeenCalled();
+		expect(result.downloadedPaths).toEqual([]);
+		expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(traversalPath));
+		expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('/etc/passwd'));
+	});
+
+	it('treats a pre-release as older than its release', async () => {
+		syncEngine = buildEngine('2.2.0');
+		mockFileOps.downloadFile.mockResolvedValue(manifestContent('2.2.0-beta'));
+		mockClient.listAllItems.mockResolvedValue([
+			makeRemoteFile(`${OWN_FOLDER}/manifest.json`, { id: 'own-manifest-id' }),
+			makeRemoteFile(`${OWN_FOLDER}/main.js`, { id: 'own-main-id' }),
+		]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(mockApp.vault.adapter.writeBinary).not.toHaveBeenCalled();
+		expect(result.downloadedPaths).toEqual([]);
+		expect(result.skippedOwnFolder).toBe(true);
+	});
+
+	it('still updates the own plugin folder from a pre-release of a newer version', async () => {
+		mockFileOps.downloadFile.mockImplementation(async (id: string) =>
+			id === 'own-manifest-id' ? manifestContent('2.2.0-beta') : new ArrayBuffer(10)
+		);
+		mockClient.listAllItems.mockResolvedValue([
+			makeRemoteFile(`${OWN_FOLDER}/manifest.json`, { id: 'own-manifest-id' }),
+			makeRemoteFile(`${OWN_FOLDER}/main.js`, { id: 'own-main-id' }),
+		]);
+
+		const result = await syncEngine.pullPluginUpdates();
+
+		expect(result.updated).toEqual(['onedrive-sync']);
+		expect(result.skippedOwnFolder).toBe(false);
 	});
 });

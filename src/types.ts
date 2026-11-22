@@ -177,7 +177,11 @@ export interface PluginUpdateResult {
 	updated: string[];
 	/** Vault paths written in this pull */
 	downloadedPaths: string[];
-	/** True when the own plugin folder was left alone */
+	/**
+	 * True when the own plugin folder was not updated: the remote version is
+	 * equal or older, the running version is unknown, or the remote manifest
+	 * could not be read.
+	 */
 	skippedOwnFolder: boolean;
 }
 
