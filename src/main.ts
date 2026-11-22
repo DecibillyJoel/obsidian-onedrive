@@ -1444,7 +1444,9 @@ export default class OneDriveSyncPlugin extends Plugin {
 				new Notice(t('notices.pluginUpdates.ownFolderSkipped'));
 			}
 			if (result.updated.length === 0) {
-				new Notice(t('notices.pluginUpdates.upToDate'));
+				// An empty result also covers a pull where every download failed,
+				// because the engine drops a failed download and warns to the console.
+				new Notice(t('notices.pluginUpdates.nothingPulled'));
 				this.setSyncStatus(SyncStatus.IDLE);
 				return;
 			}

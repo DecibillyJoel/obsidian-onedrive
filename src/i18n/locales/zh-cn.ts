@@ -125,7 +125,8 @@ export const zhCn = {
 			engineNotInitialized: '插件更新：同步引擎尚未就绪。',
 			alreadyInProgress: '插件更新：同步正在进行。',
 			ownFolderSkipped: '插件更新：onedrive-sync 插件文件夹未更新。',
-			upToDate: '插件更新：未下载任何插件文件。',
+			nothingPulled:
+				'插件更新：未从 OneDrive 拉取任何插件文件。请检查控制台日志以查找下载错误。',
 			plugin: '个插件',
 			plugins: '个插件',
 			summary: '插件更新：已更新 {{pluginCount}} {{pluginLabel}}（已下载 {{fileCount}} {{fileLabel}}）。',

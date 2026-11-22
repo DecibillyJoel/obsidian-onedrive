@@ -131,7 +131,8 @@ export const en = {
 			engineNotInitialized: 'Plugin updates: the sync engine is not ready.',
 			alreadyInProgress: 'Plugin updates: a sync is already in progress.',
 			ownFolderSkipped: 'Plugin updates: the onedrive-sync plugin folder was not updated.',
-			upToDate: 'Plugin updates: no plugin files were downloaded.',
+			nothingPulled:
+				'Plugin updates: no plugin files were pulled from OneDrive. Check the console log for download errors.',
 			plugin: 'plugin',
 			plugins: 'plugins',
 			summary:

@@ -1045,7 +1045,7 @@ describe('OneDriveSyncPlugin', () => {
 			expect(noticeMessages).toContain(
 				'Plugin updates: the onedrive-sync plugin folder was not updated.'
 			);
-			expect(noticeMessages).toContain('Plugin updates: no plugin files were downloaded.');
+			expect(noticeMessages).toContain('Plugin updates: no plugin files were pulled from OneDrive. Check the console log for download errors.');
 			expect(mocks.reloadPlugins).not.toHaveBeenCalled();
 		});
 
@@ -1054,7 +1054,25 @@ describe('OneDriveSyncPlugin', () => {
 
 			await plugin.pullPluginUpdates();
 
-			expect(noticeMessages).toContain('Plugin updates: no plugin files were downloaded.');
+			expect(noticeMessages).toContain('Plugin updates: no plugin files were pulled from OneDrive. Check the console log for download errors.');
+			expect(mocks.reloadPlugins).not.toHaveBeenCalled();
+		});
+
+		it('never reports a run as up to date when every download failed', async () => {
+			configureSync();
+			// A failed download is dropped and warned to the console, so a run where
+			// every download failed looks the same as a run with nothing to pull.
+			// The notice must not claim that the plugins are current.
+			mocks.syncEngine.pullPluginUpdates.mockResolvedValue({
+				updated: [],
+				downloadedPaths: [],
+				skippedOwnFolder: false,
+			});
+
+			await plugin.pullPluginUpdates();
+
+			expect(noticeMessages.join('\n')).not.toMatch(/up to date/i);
+			expect(noticeMessages).toContain('Plugin updates: no plugin files were pulled from OneDrive. Check the console log for download errors.');
 			expect(mocks.reloadPlugins).not.toHaveBeenCalled();
 		});
 
