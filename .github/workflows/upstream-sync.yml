@@ -92,13 +92,30 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git merge --no-edit "refs/tags/${REF}"; then
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+
+          if git merge --no-commit --no-ff "refs/tags/${REF}"; then
+            git commit --no-edit
+            sed -i 's/^merged=false$/merged=true/' "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U | sort > "$RUNNER_TEMP/conflicts.txt"
+            outside=$(grep -vE '^(manifest\.json|package\.json|package-lock\.json|versions\.json)$' "$RUNNER_TEMP/conflicts.txt" || true)
+            if [ -z "$outside" ]; then
+              base=$(git show "refs/tags/${REF}:manifest.json" | node -e 'let s="";process.stdin.on("data",(d)=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).version))')
+              version=$(node .github/scripts/resolve-version-conflicts.mjs "$base" | tail -n 1)
+              echo "Version files conflicted. Resolved as ${version}."
+              git add manifest.json package.json versions.json package-lock.json 2>/dev/null || true
+              git commit --no-edit
+              sed -i 's/^merged=false$/merged=true/' "$GITHUB_OUTPUT"
+            else
+              echo "Conflict outside the version files."
+              git merge --abort || true
+            fi
+          fi
+
+          if grep -qx 'merged=true' "$GITHUB_OUTPUT"; then
             git push origin HEAD:main
             gh workflow run release.yml --ref main
-            echo "merged=true" >> "$GITHUB_OUTPUT"
-          else
-            { git diff --name-only --diff-filter=U | sort > "$RUNNER_TEMP/conflicts.txt"; } || true
-            echo "merged=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Report the conflict
