@@ -125,6 +125,22 @@ export const de = {
 				'Force upload local complete: {{uploaded}} uploaded, {{deleted}} deleted, {{refreshed}} refreshed.',
 			failed: 'Force upload local failed: {{message}}',
 		},
+		pluginUpdates: {
+			notConnected: 'Plugin updates: not connected to OneDrive.',
+			selectFolderFirst: 'Plugin updates: select a sync folder in settings first.',
+			engineNotInitialized: 'Plugin updates: the sync engine is not ready.',
+			alreadyInProgress: 'Plugin updates: a sync is already in progress.',
+			ownFolderSkipped: 'Plugin updates: the onedrive-sync plugin folder was not updated.',
+			nothingPulled:
+				'Plugin updates: no plugin files were pulled from OneDrive. Check the console log for download errors.',
+			plugin: 'plugin',
+			plugins: 'plugins',
+			summary:
+				'Plugin updates: {{pluginCount}} {{pluginLabel}} updated ({{fileCount}} {{fileLabel}} downloaded).',
+			reloaded: 'Plugin updates: reloaded {{names}}.',
+			reloadFailed: 'Plugin updates: could not reload {{names}}.',
+			failed: 'Plugin updates failed: {{message}}',
+		},
 		dev: {
 			noFileFound: 'OneDrive DEV: Keine Datei gefunden, um einen Testkonflikt zu erstellen',
 			createdTestConflict: 'OneDrive DEV: Testkonflikt erstellt für "{{path}}"',
@@ -304,6 +320,11 @@ export const de = {
 				name: 'Plugins synchronisieren',
 				desc: '{{configDir}}/community-plugins.json, {{configDir}}/core-plugins.json, Plugin-Manifeste und Plugin-Binärdateien (main.js, styles.css) synchronisieren.',
 			},
+			pluginUpdates: {
+				name: 'Check for plugin updates',
+				desc: 'Pull unsynced plugin files from OneDrive, then reload the plugins that changed.',
+				button: 'Check now',
+			},
 			pluginData: {
 				name: 'Plugin-Daten synchronisieren',
 				desc: 'Synchronisiert zusätzlich die data.json-Einstellungsdatei jedes Plugins. Die eigenen Daten von OneDrive Sync bleiben gerätespezifisch. Warnung: Plugin-Daten können gerätespezifisch sein und Konflikte verursachen; nur aktivieren, wenn du das Synchronisierungsverhalten des Plugins verstehst.',
@@ -315,6 +336,10 @@ export const de = {
 			bookmarks: {
 				name: 'Lesezeichen synchronisieren',
 				desc: '{{configDir}}/bookmarks.json synchronisieren, um Lesezeichen geräteübergreifend konsistent zu halten.',
+			},
+			allHiddenFiles: {
+				name: 'Sync all hidden files and folders (power user)',
+				desc: "Sync every hidden path, including .workspaces and all of {{configDir}}. This overrides the selective settings above. The OneDrive Sync plugin's own folder and local debug logs remain excluded to protect credentials and sync state.",
 			},
 			status: {
 				name: 'Synchronisierungsstatus',

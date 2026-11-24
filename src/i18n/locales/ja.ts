@@ -124,6 +124,22 @@ export const ja = {
 				'Force upload local complete: {{uploaded}} uploaded, {{deleted}} deleted, {{refreshed}} refreshed.',
 			failed: 'Force upload local failed: {{message}}',
 		},
+		pluginUpdates: {
+			notConnected: 'Plugin updates: not connected to OneDrive.',
+			selectFolderFirst: 'Plugin updates: select a sync folder in settings first.',
+			engineNotInitialized: 'Plugin updates: the sync engine is not ready.',
+			alreadyInProgress: 'Plugin updates: a sync is already in progress.',
+			ownFolderSkipped: 'Plugin updates: the onedrive-sync plugin folder was not updated.',
+			nothingPulled:
+				'Plugin updates: no plugin files were pulled from OneDrive. Check the console log for download errors.',
+			plugin: 'plugin',
+			plugins: 'plugins',
+			summary:
+				'Plugin updates: {{pluginCount}} {{pluginLabel}} updated ({{fileCount}} {{fileLabel}} downloaded).',
+			reloaded: 'Plugin updates: reloaded {{names}}.',
+			reloadFailed: 'Plugin updates: could not reload {{names}}.',
+			failed: 'Plugin updates failed: {{message}}',
+		},
 		dev: {
 			noFileFound: 'OneDrive DEV: テスト競合を作成するファイルが見つかりません',
 			createdTestConflict: 'OneDrive DEV: "{{path}}" のテスト競合を作成しました',
@@ -303,6 +319,11 @@ export const ja = {
 				name: 'プラグインを同期',
 				desc: '{{configDir}}/community-plugins.json、{{configDir}}/core-plugins.json、プラグインマニフェスト、プラグインバイナリ（main.js、styles.css）を同期。',
 			},
+			pluginUpdates: {
+				name: 'Check for plugin updates',
+				desc: 'Pull unsynced plugin files from OneDrive, then reload the plugins that changed.',
+				button: 'Check now',
+			},
 			pluginData: {
 				name: 'プラグインデータを同期',
 				desc: '各プラグインの data.json 設定ファイルも同期します。OneDrive Sync 自体のデータは端末内に保持されます。警告: プラグインのデータは端末固有の場合があり、競合を引き起こすことがあります。プラグインの同期動作を理解している場合にのみ有効にしてください。',
@@ -314,6 +335,10 @@ export const ja = {
 			bookmarks: {
 				name: 'ブックマークを同期',
 				desc: '{{configDir}}/bookmarks.jsonを同期して、デバイス間でブックマークを一貫させます。',
+			},
+			allHiddenFiles: {
+				name: 'Sync all hidden files and folders (power user)',
+				desc: "Sync every hidden path, including .workspaces and all of {{configDir}}. This overrides the selective settings above. The OneDrive Sync plugin's own folder and local debug logs remain excluded to protect credentials and sync state.",
 			},
 			status: {
 				name: '同期状態',
