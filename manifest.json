@@ -1,10 +1,10 @@
 {
-	"id": "onedrive-sync",
-	"name": "OneDrive Sync",
-	"version": "2.1.2-fork.1",
-	"minAppVersion": "1.12.0",
-	"description": "Sync your vault with OneDrive Personal/Consumer.",
-	"author": "Jeff Steinbok (forked by DecibillyJoel)",
-	"authorUrl": "https://github.com/DecibillyJoel/obsidian-onedrive",
-	"isDesktopOnly": false
+  "id": "onedrive-sync",
+  "name": "OneDrive Sync",
+  "version": "2.1.2-fork.3",
+  "minAppVersion": "1.12.0",
+  "description": "Sync your vault with OneDrive Personal/Consumer.",
+  "author": "Jeff Steinbok (forked by DecibillyJoel)",
+  "authorUrl": "https://github.com/DecibillyJoel/obsidian-onedrive",
+  "isDesktopOnly": false
 }
